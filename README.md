@@ -1,6 +1,6 @@
 # SimpleWeather — Hourly Climatology + Chamber Overlay
 
-A utility to build **monthly hourly temperature climatologies** from **climate.af.mil** station CSVs (converted to **local time**), and to **overlay a climate-chamber test profile**. Also supports **composite plots** across many stations.
+A utility to build **monthly hourly temperature climatologies** from **climate.af.mil** station CSVs (converted to **local time**), and to **overlay a climate‑chamber test profile**. Also supports **composite plots** across many stations.
 
 ---
 
@@ -12,7 +12,7 @@ A utility to build **monthly hourly temperature climatologies** from **climate.a
   - Climatology is **interpolated** to the test hours
 - **Composite mode** over a folder of stations
   - Auto‑discovers CSVs whose filenames start with a **four‑letter ID** (e.g., `KDLF_*.csv` or `KDLF-*.csv`)
-  - Draws **one mean line per station** and (unless `--average_only`) a **±1 SD** shaded band
+  - Draws **one mean line per station** and (unless `--average_only`) shades **25–75% (IQR)** and **5–95%** ranges
   - Can **overlay a chamber test** on the composite via `--composite_test`
 - **Extreme‑days callouts** (for the selected month)
   - Average **days per year** in these bins (shown only if non‑zero): **100–109°F**, **≥110°F**, **−5 to −9°F**, **≤−10°F**
@@ -133,10 +133,12 @@ outputs/
 
 ### Composite
 - One **mean line** per station
-- Optional **±1 SD** band per station (omit with `--average_only`)
-- **Legend** includes a labeled entry for the **±1 SD shaded region** when bands are drawn
+- Optional shaded ranges (omit with `--average_only`): **25–75% (IQR)** and **5–95% Range**
+- **Legend** includes labeled entries for the shaded ranges when drawn
 - **Callout** titled **“Average days per year”** listing each station’s non‑zero extreme‑day bins
 - Optional **Chamber Profile** overlay (`--composite_test`)
+
+> With `--years 1`, shaded ranges reflect **day‑to‑day** variability within that single month/year. With more years, they blend **year‑to‑year** and **day‑to‑day** variations.
 
 ---
 
@@ -163,7 +165,7 @@ outputs/
 --composite       Enable composite mode (scan --data_dir)
 --stations        Comma‑separated station IDs to include (composite filter)
 --composite_test  Chamber test CSV to overlay on composite
---average_only    Mean line only (hide ±1 SD bands) — applies to both modes
+--average_only    Mean line only (hide shaded ranges) — applies to both modes
 ```
 
 ---
@@ -184,4 +186,5 @@ outputs/
 - Added **extreme‑days callouts** with **“Average days per year”** label
 - Cleaned output layout + **descriptive PNG names**
 - Test overlay available in **single** (`--test`) and **composite** (`--composite_test`) modes
+- Composite shaded regions updated to **25–75% (IQR)** and **5–95% Range**
 - Robust dtypes, NaN‑safe percentiles, and layered plotting so annotations stay visible

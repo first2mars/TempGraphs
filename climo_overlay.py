@@ -212,7 +212,8 @@ def plot_composite_mean_std(
     station_ids = sorted({c.split("_")[0] for c in df.columns if c.endswith("_mean")})
 
     x = df["hour_local"].to_numpy(float)
-    drew_std_band = False
+    drew_iqr_band = False
+    drew_p95_band = False
     for ident in station_ids:
         mean_col = f"{ident}_mean"
         std_col = f"{ident}_std"
@@ -220,10 +221,23 @@ def plot_composite_mean_std(
             continue
         y = df[mean_col].to_numpy(float)
         plt.plot(x, y, label=ident, zorder=2)
-        if not average_only and std_col in df.columns:
-            s = df[std_col].to_numpy(float)
-            plt.fill_between(x, y - s, y + s, alpha=0.12, zorder=1)
-            drew_std_band = True
+        if not average_only:
+            p25_col = f"{ident}_p25"
+            p75_col = f"{ident}_p75"
+            p05_col = f"{ident}_p05"
+            p95_col = f"{ident}_p95"
+            # 25–75% (IQR)
+            if p25_col in df.columns and p75_col in df.columns:
+                q25 = df[p25_col].to_numpy(float)
+                q75 = df[p75_col].to_numpy(float)
+                plt.fill_between(x, q25, q75, alpha=0.25, zorder=1)
+                drew_iqr_band = True
+            # 5–95% range
+            if p05_col in df.columns and p95_col in df.columns:
+                q05 = df[p05_col].to_numpy(float)
+                q95 = df[p95_col].to_numpy(float)
+                plt.fill_between(x, q05, q95, alpha=0.12, zorder=1)
+                drew_p95_band = True
 
     # Build a multi-station callout of extreme-day averages (days/yr) if provided
     if extremes_by_ident:
@@ -278,13 +292,16 @@ def plot_composite_mean_std(
     plt.ylabel("Temperature (°F)")
     plt.title(f"Composite Climatology {title_suffix}")
     ax = plt.gca()
-    if drew_std_band:
-        from matplotlib.patches import Patch
-        shaded_patch = Patch(facecolor='gray', alpha=0.12, label='±1 Std Dev')
-        handles, labels = ax.get_legend_handles_labels()
-        handles.append(shaded_patch)
-        labels.append('±1 Std Dev')
-        ax.legend(handles, labels, ncol=2)
+    from matplotlib.patches import Patch
+    handles, labels = ax.get_legend_handles_labels()
+    # Add patches for shaded regions if drawn
+    if drew_iqr_band:
+        handles.append(Patch(facecolor='gray', alpha=0.25, label='25–75% (IQR)'))
+    if drew_p95_band:
+        handles.append(Patch(facecolor='gray', alpha=0.12, label='5–95% Range'))
+    if len(handles) != len(labels):
+        # We added at least one patch
+        ax.legend(handles, [h.get_label() for h in handles], ncol=2)
     else:
         ax.legend(ncol=2)
     plt.grid(True)
@@ -474,7 +491,7 @@ def main():
                 climo_interp["p75"] = np.interp(test["hour"], climo["hour_local"], climo["p75"])
                 climo_interp["p95"] = np.interp(test["hour"], climo["hour_local"], climo["p95"])
 
-                title_prefix = f"{calendar.month_name[int(args.month)]} Climatology • {args.tz} • {climo.attrs.get('start_year','?')}-{climo.attrs.get('latest_year','?')}"
+                title_prefix = f"{ident} — {calendar.month_name[int(args.month)]} Climatology • {climo.attrs.get('start_year','?')}-{climo.attrs.get('latest_year','?')}"
                 overlay_png_name = f"{ident}_{mon_abbr}_overlay.png"
                 residuals_png_name = f"{ident}_{mon_abbr}_residuals.png"
                 overlay_and_metrics(

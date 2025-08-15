@@ -103,7 +103,9 @@ def build_monthly_climatology(
 
 def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: str,
                         title_prefix: str = "Del Rio AFB (KDLF)", average_only: bool = False,
-                        extreme_days: dict | None = None):
+                        extreme_days: dict | None = None,
+                        overlay_png_name: str | None = None,
+                        residuals_png_name: str | None = None):
     # Merge test and climo_interp on hour
     merged = pd.merge(test, climo_interp, on="hour", suffixes=("_test", "_climo"))
 
@@ -126,11 +128,11 @@ def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: 
 
     plt.figure(figsize=(13, 6.5))
     if not average_only:
-        plt.fill_between(x, p05, p95, alpha=0.12, label="5–95%")
-        plt.fill_between(x, p25, p75, alpha=0.25, label="25–75% (IQR)")
-        plt.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.20, label="±1 Std Dev")
-    plt.plot(x, y_mean, label="Mean Temp (°F)")
-    plt.plot(x, y_test, linewidth=2.5, marker="o", label="Chamber Profile")
+        plt.fill_between(x, p05, p95, alpha=0.12, label="5–95%", zorder=1)
+        plt.fill_between(x, p25, p75, alpha=0.25, label="25–75% (IQR)", zorder=1)
+        plt.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.20, label="±1 Std Dev", zorder=1)
+    plt.plot(x, y_mean, label="Mean Temp (°F)", zorder=2)
+    plt.plot(x, y_test, linewidth=2.5, marker="o", label="Chamber Profile", zorder=3)
 
     # Optional callout for extreme days (average per year). Only show non-zero categories.
     callout_lines = []
@@ -145,10 +147,21 @@ def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: 
             if pd.notna(val) and float(val) > 0:
                 callout_lines.append(f"{lab}: {float(val):.1f} days/yr")
     if callout_lines:
-        txt = "\n".join(callout_lines)
+        # Draw a small label ABOVE the box
         ax = plt.gca()
-        ax.text(0.98, 0.02, txt, transform=ax.transAxes, ha='right', va='bottom',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        ax.text(
+            0.98, 0.18, "Average days per year",
+            transform=ax.transAxes, ha='right', va='bottom', fontsize=9, fontweight='bold',
+            zorder=10, clip_on=False
+        )
+        # Then draw the box with ONLY the values
+        txt = "\n".join(callout_lines)
+        ax.text(
+            0.98, 0.06, txt,
+            transform=ax.transAxes, ha='right', va='bottom',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+            zorder=10, clip_on=False
+        )
 
     plt.xlabel("Local Hour")
     plt.ylabel("Temperature (°F)")
@@ -157,7 +170,7 @@ def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: 
     plt.grid(True)
     plt.tight_layout()
 
-    overlay_png_path = os.path.join(outdir, "overlay_chamber_vs_climo.png")
+    overlay_png_path = os.path.join(outdir, overlay_png_name or "overlay.png")
     plt.savefig(overlay_png_path)
     plt.close()
 
@@ -170,8 +183,7 @@ def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: 
     plt.title(f"Residuals: Chamber Profile - Climatology — {title_prefix}")
     plt.grid(True)
     plt.tight_layout()
-
-    residuals_png_path = os.path.join(outdir, "residuals.png")
+    residuals_png_path = os.path.join(outdir, residuals_png_name or "residuals.png")
     plt.savefig(residuals_png_path)
     plt.close()
 
@@ -180,8 +192,16 @@ def infer_identifier_from_path(path: str) -> str:
     ident = basename.split("_")[0]
     return ident
 
-def plot_composite_mean_std(df: pd.DataFrame, out_png: str, title_suffix: str = "", average_only: bool = False,
-                            extremes_by_ident: dict[str, dict] | None = None):
+
+
+def plot_composite_mean_std(
+    df: pd.DataFrame,
+    out_png: str,
+    title_suffix: str = "",
+    average_only: bool = False,
+    extremes_by_ident: dict[str, dict] | None = None,
+    test: pd.DataFrame | None = None,
+):
     """
     Plot a single mean line per station. If average_only is False, also plot that station's ±1 SD band.
     Expects columns like: hour_local, KDLF_mean, KDLF_std, KEND_mean, KEND_std, ...
@@ -192,16 +212,18 @@ def plot_composite_mean_std(df: pd.DataFrame, out_png: str, title_suffix: str = 
     station_ids = sorted({c.split("_")[0] for c in df.columns if c.endswith("_mean")})
 
     x = df["hour_local"].to_numpy(float)
+    drew_std_band = False
     for ident in station_ids:
         mean_col = f"{ident}_mean"
         std_col = f"{ident}_std"
         if mean_col not in df.columns:
             continue
         y = df[mean_col].to_numpy(float)
-        plt.plot(x, y, label=ident)
+        plt.plot(x, y, label=ident, zorder=2)
         if not average_only and std_col in df.columns:
             s = df[std_col].to_numpy(float)
-            plt.fill_between(x, y - s, y + s, alpha=0.12)
+            plt.fill_between(x, y - s, y + s, alpha=0.12, zorder=1)
+            drew_std_band = True
 
     # Build a multi-station callout of extreme-day averages (days/yr) if provided
     if extremes_by_ident:
@@ -221,19 +243,70 @@ def plot_composite_mean_std(df: pd.DataFrame, out_png: str, title_suffix: str = 
             if parts:
                 lines.append(f"{ident}: " + ", ".join(parts))
         if lines:
-            txt = "\n".join(lines)
             ax = plt.gca()
-            ax.text(0.98, 0.02, txt, transform=ax.transAxes, ha='right', va='bottom',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.85), fontsize=9)
+            # Draw label ABOVE the box
+            ax.text(
+                0.98, 0.18, "Average days per year",
+                transform=ax.transAxes, ha='right', va='bottom', fontsize=9, fontweight='bold',
+                zorder=10, clip_on=False
+            )
+            # Then the box with ONLY the values
+            txt = "\n".join(lines)
+            ax.text(
+                0.98, 0.06, txt,
+                transform=ax.transAxes, ha='right', va='bottom',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85),
+                fontsize=9,
+                zorder=10, clip_on=False
+            )
+
+    # Optional overlay of chamber test profile
+    if test is not None:
+        cols = {str(c).strip().lower() for c in test.columns}
+        if {"hour", "temp"}.issubset(cols):
+            x_t = pd.to_numeric(test["hour"], errors="coerce").to_numpy()
+            y_t = pd.to_numeric(test["temp"], errors="coerce").to_numpy()
+            mask = np.isfinite(x_t) & np.isfinite(y_t)
+            if mask.any():
+                plt.plot(
+                    x_t[mask], y_t[mask],
+                    linewidth=2.8, marker="o",
+                    label="Chamber Profile", zorder=3
+                )
 
     plt.xlabel("Local Hour")
     plt.ylabel("Temperature (°F)")
     plt.title(f"Composite Climatology {title_suffix}")
-    plt.legend(ncol=2)
+    ax = plt.gca()
+    if drew_std_band:
+        from matplotlib.patches import Patch
+        shaded_patch = Patch(facecolor='gray', alpha=0.12, label='±1 Std Dev')
+        handles, labels = ax.get_legend_handles_labels()
+        handles.append(shaded_patch)
+        labels.append('±1 Std Dev')
+        ax.legend(handles, labels, ncol=2)
+    else:
+        ax.legend(ncol=2)
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(out_png)
     plt.close()
+
+
+# Resolve latest station CSV in a directory by 4-letter identifier prefix
+# Chooses the lexicographically last filename that matches, which typically
+# corresponds to the most recent export pattern.
+def find_latest_station_csv(data_dir: str, ident: str) -> str | None:
+    ident = ident.strip().upper()
+    pat = re.compile(rf"^{ident}[_-].*\.csv$", re.IGNORECASE)
+    try:
+        candidates = [n for n in os.listdir(data_dir) if pat.match(n)]
+    except FileNotFoundError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort()
+    return os.path.join(data_dir, candidates[-1])
 
 def main():
     ap = argparse.ArgumentParser(description="Build hourly temperature climatologies and overlay chamber test profiles.")
@@ -251,6 +324,7 @@ def main():
     ap.add_argument("--composite_test", help="Chamber test CSV to overlay on composite")
     ap.add_argument("--average_only", action="store_true", help="Draw mean lines only (hide ±1 SD bands)")
     ap.add_argument("--stations", help="Comma-separated station identifiers (e.g., KDLF,KEND)")
+    ap.add_argument("--station", help="Single-station mode: comma-separated 4-letter IDs (e.g., KDLF or KDLF,KEND). Requires --data_dir if --raw is not provided. If both --raw and --station are provided, --raw takes priority.")
 
     args = ap.parse_args()
 
@@ -258,7 +332,8 @@ def main():
         if not args.data_dir:
             raise ValueError("--data_dir is required for composite mode")
 
-        composite_dir = os.path.join(args.outdir, "composite")
+        mon_abbr = calendar.month_abbr[int(args.month)].lower()
+        composite_dir = os.path.join(args.outdir, "composite", mon_abbr)
         os.makedirs(composite_dir, exist_ok=True)
 
         climo_dfs = []
@@ -291,13 +366,9 @@ def main():
             # Keep station-specific extreme-day averages
             extremes_by_ident[ident_i] = cl.attrs.get('extreme_days', {})
 
-            mon_abbr = calendar.month_abbr[int(args.month)].lower()
-            station_outdir_i = os.path.join(args.outdir, ident_i)
+            station_outdir_i = os.path.join(args.outdir, "stations", ident_i, mon_abbr)
             os.makedirs(station_outdir_i, exist_ok=True)
-            per_csv_path = os.path.join(
-                station_outdir_i,
-                f"{mon_abbr}_climatology_local_{cl.attrs.get('start_year','?')}_{cl.attrs.get('latest_year','?')}.csv",
-            )
+            per_csv_path = os.path.join(station_outdir_i, "climo.csv")
             cl.to_csv(per_csv_path, index=False)
             climo_dfs.append(cl.rename(columns=lambda c: f"{ident_i}_{c}" if c != "hour_local" else c))
 
@@ -311,88 +382,109 @@ def main():
         start_year = min(cl.attrs.get("start_year", 0) for cl in climo_dfs)
         latest_year = max(cl.attrs.get("latest_year", 0) for cl in climo_dfs)
 
-        mon_abbr = calendar.month_abbr[int(args.month)].lower()
-        composite_csv = os.path.join(
-            composite_dir,
-            f"composite_{mon_abbr}_climo_local_{start_year}_{latest_year}.csv",
-        )
+        composite_csv = os.path.join(composite_dir, "climo.csv")
         composite_df.to_csv(composite_csv, index=False)
 
+        nstations = len(extremes_by_ident) if extremes_by_ident else len([c for c in composite_df.columns if c.endswith("_mean")])
         composite_png = os.path.join(
             composite_dir,
-            f"composite_{mon_abbr}_mean_std_local_{start_year}_{latest_year}.png",
+            f"composite_{mon_abbr}_mean_std_local_{start_year}_{latest_year}_{nstations}stns.png",
         )
         title_suffix = f"{calendar.month_name[int(args.month)]} ({start_year}–{latest_year})"
+
+        test_df_for_composite = None
+        if args.composite_test:
+            test_df_for_composite = pd.read_csv(
+                args.composite_test,
+                dtype={"hour": "float64", "temp": "float64"},
+                low_memory=False,
+            )
+            test_df_for_composite.columns = [c.strip().lower() for c in test_df_for_composite.columns]
+            print(f"[INFO] Composite test loaded: {len(test_df_for_composite)} rows from {args.composite_test}")
 
         plot_composite_mean_std(
             composite_df, composite_png,
             title_suffix=title_suffix,
             average_only=args.average_only,
             extremes_by_ident=extremes_by_ident,
+            test=test_df_for_composite,
         )
-
-        if args.composite_test:
-            test = pd.read_csv(
-                args.composite_test,
-                dtype={"hour": "float64", "temp": "float64"},
-                low_memory=False,
-            )
-            test.columns = [c.strip().lower() for c in test.columns]
-            # Additional composite test overlay code would go here (not specified)
 
     else:
-        if not args.raw:
-            raise ValueError("--raw is required for single-station mode")
+        # Determine which station files to run in single-station mode
+        raw_paths: list[str] = []
+        if args.raw:
+            raw_paths = [args.raw]
+        elif args.station:
+            if not args.data_dir:
+                raise ValueError("--data_dir is required when using --station in single-station mode")
+            idents = [tok.strip().upper() for tok in args.station.split(',') if tok.strip()]
+            for ident_req in idents:
+                resolved = find_latest_station_csv(args.data_dir, ident_req)
+                if not resolved:
+                    print(f"[WARN] No CSV found in {args.data_dir} for station {ident_req}")
+                    continue
+                raw_paths.append(resolved)
+        else:
+            raise ValueError("Provide either --raw or --station for single-station mode")
 
-        climo = build_monthly_climatology(args.raw, month=args.month, years=args.years, tz_name=args.tz)
+        if not raw_paths:
+            print("No station files to process in single-station mode.")
+            return
 
-        ident = infer_identifier_from_path(args.raw)
-        station_outdir = os.path.join(args.outdir, ident)
-        os.makedirs(station_outdir, exist_ok=True)
+        # Process each selected station file
+        for raw_path in raw_paths:
+            climo = build_monthly_climatology(raw_path, month=args.month, years=args.years, tz_name=args.tz)
 
-        mon_abbr = calendar.month_abbr[int(args.month)].lower()
-        climo_csv = os.path.join(
-            station_outdir,
-            f"{mon_abbr}_climatology_local_{climo.attrs.get('start_year','?')}_{climo.attrs.get('latest_year','?')}.csv",
-        )
-        climo.to_csv(climo_csv, index=False)
+            ident = infer_identifier_from_path(raw_path)
+            mon_abbr = calendar.month_abbr[int(args.month)].lower()
+            station_outdir = os.path.join(args.outdir, "stations", ident, mon_abbr)
+            os.makedirs(station_outdir, exist_ok=True)
 
-        if args.test:
-            test = pd.read_csv(
-                args.test,
-                dtype={"hour": "float64", "temp": "float64"},
-                low_memory=False,
-            )
-            # Normalize headers just in case
-            test.columns = [c.strip().lower() for c in test.columns]
-            # Ensure required columns are present and numeric
-            if not {"hour", "temp"}.issubset(set(test.columns)):
-                raise ValueError("Test CSV must have columns: hour,temp")
-            test = test.dropna(subset=["hour", "temp"]).sort_values("hour").reset_index(drop=True)
+            # Save per-station climatology with simple name
+            climo_csv = os.path.join(station_outdir, "climo.csv")
+            climo.to_csv(climo_csv, index=False)
 
-            # Ensure climo numeric for interpolation
-            for col in ["hour_local", "mean", "std", "min", "max", "p05", "p25", "p75", "p95"]:
-                climo[col] = pd.to_numeric(climo[col], errors="coerce")
+            if args.test:
+                test = pd.read_csv(
+                    args.test,
+                    dtype={"hour": "float64", "temp": "float64"},
+                    low_memory=False,
+                )
+                # Normalize headers just in case
+                test.columns = [c.strip().lower() for c in test.columns]
+                # Ensure required columns are present and numeric
+                if not {"hour", "temp"}.issubset(set(test.columns)):
+                    raise ValueError("Test CSV must have columns: hour,temp")
+                test = test.dropna(subset=["hour", "temp"]).sort_values("hour").reset_index(drop=True)
 
-            # Interpolate climo to test hours
-            climo_interp = pd.DataFrame()
-            climo_interp["hour"] = test["hour"]
-            climo_interp["mean"] = np.interp(test["hour"], climo["hour_local"], climo["mean"])
-            climo_interp["std"] = np.interp(test["hour"], climo["hour_local"], climo["std"])
-            climo_interp["min"] = np.interp(test["hour"], climo["hour_local"], climo["min"])
-            climo_interp["max"] = np.interp(test["hour"], climo["hour_local"], climo["max"])
-            climo_interp["p05"] = np.interp(test["hour"], climo["hour_local"], climo["p05"])
-            climo_interp["p25"] = np.interp(test["hour"], climo["hour_local"], climo["p25"])
-            climo_interp["p75"] = np.interp(test["hour"], climo["hour_local"], climo["p75"])
-            climo_interp["p95"] = np.interp(test["hour"], climo["hour_local"], climo["p95"])
+                # Ensure climo numeric for interpolation
+                for col in ["hour_local", "mean", "std", "min", "max", "p05", "p25", "p75", "p95"]:
+                    climo[col] = pd.to_numeric(climo[col], errors="coerce")
 
-            title_prefix = f"{calendar.month_name[int(args.month)]} Climatology • {args.tz} • {climo.attrs.get('start_year','?')}-{climo.attrs.get('latest_year','?')}"
-            overlay_and_metrics(
-                test, climo_interp, station_outdir,
-                title_prefix=title_prefix,
-                average_only=args.average_only,
-                extreme_days=climo.attrs.get('extreme_days')
-            )
+                # Interpolate climo to test hours
+                climo_interp = pd.DataFrame()
+                climo_interp["hour"] = test["hour"]
+                climo_interp["mean"] = np.interp(test["hour"], climo["hour_local"], climo["mean"])
+                climo_interp["std"] = np.interp(test["hour"], climo["hour_local"], climo["std"])
+                climo_interp["min"] = np.interp(test["hour"], climo["hour_local"], climo["min"])
+                climo_interp["max"] = np.interp(test["hour"], climo["hour_local"], climo["max"])
+                climo_interp["p05"] = np.interp(test["hour"], climo["hour_local"], climo["p05"])
+                climo_interp["p25"] = np.interp(test["hour"], climo["hour_local"], climo["p25"])
+                climo_interp["p75"] = np.interp(test["hour"], climo["hour_local"], climo["p75"])
+                climo_interp["p95"] = np.interp(test["hour"], climo["hour_local"], climo["p95"])
+
+                title_prefix = f"{calendar.month_name[int(args.month)]} Climatology • {args.tz} • {climo.attrs.get('start_year','?')}-{climo.attrs.get('latest_year','?')}"
+                overlay_png_name = f"{ident}_{mon_abbr}_overlay.png"
+                residuals_png_name = f"{ident}_{mon_abbr}_residuals.png"
+                overlay_and_metrics(
+                    test, climo_interp, station_outdir,
+                    title_prefix=title_prefix,
+                    average_only=args.average_only,
+                    extreme_days=climo.attrs.get('extreme_days'),
+                    overlay_png_name=overlay_png_name,
+                    residuals_png_name=residuals_png_name,
+                )
 
 if __name__ == "__main__":
     main()

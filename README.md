@@ -1,30 +1,38 @@
-Got it — since I can’t directly create the file for you right now, here’s the full README.md content you can copy into a file at the root of your project:
+Here’s a clean composite example (no --raw, filters to KDLF & KEND, mean lines only, and overlays your chamber profile):
+
+python climo_overlay.py \
+  --outdir "./outputs" \
+  --data_dir "./data" \
+  --years 10 \
+  --month 8 \
+  --composite \
+  --average_only \
+  --stations "KDLF,KEND" \
+  --composite_test "./data/111Ftest.csv"
+
+And here’s an updated README.md you can drop in that captures everything we’ve built so far — flags, output structure, examples, and gotchas.
 
 ⸻
 
+SimpleWeather — Hourly Climatology + Chamber Overlay
 
-# SimpleWeather — Hourly Climatology + Chamber Overlay
+A utility to build monthly hourly temperature climatologies from climate.af.mil station CSVs (converted to local time), and to overlay a chamber test profile. Also supports composite plots across many stations.
 
-A small utility to build **hourly temperature climatologies** (by month; currently August) from **climate.af.mil** station CSVs, convert to **local time**, and optionally **overlay a chamber test profile**. It also supports **composite plots** across many stations at once.
+What it does
+	•	Monthly climatology per station (you choose the month):
+	•	Per local hour (0–23): mean, std, min, max, p05, p25, p75, p95
+	•	Uses the most recent N years found in the file (default 10)
+	•	Overlay a chamber test (hour,temp; 24 or 48 points). Climo is interpolated to your test hours.
+	•	Composite mode across a folder:
+	•	Auto-discovers CSVs whose filenames start with a four-letter ID (e.g., KDLF_*.csv or KDLF-*.csv)
+	•	Draws one mean line per station, with optional ±1 SD band
+	•	Can overlay your test profile on the composite
+	•	Extreme-days callouts (for the selected month), showing the average days/year in these bins (shown only if non-zero):
+	•	100–109°F, ≥110°F, −5 to −9°F, ≤−10°F
 
-## Features
+⸻
 
-- Build **August hourly climatology** from station CSV  
-  - Stats per local hour: **mean, std, min, max, 5th, 25th, 75th, 95th percentiles**
-  - Uses most recent **N years** present in your file (default **10**)
-- **Overlay** a chamber test profile (24 or 48 points, `hour,temp`)
-- **Composite mode** across a directory of stations  
-  - One plot with a **line per station** (+ optional ±1 SD bands)  
-  - Optional **test profile** overlay on the composite
-- Organized outputs:  
-  - Per station → `./outputs/<IDENT>/...`  
-  - Composite → `./outputs/composite/...`
-- Station identifier is inferred from the filename prefix (e.g., `KDLF_...csv` → `KDLF`)
-- Time zone handled via `zoneinfo` (`America/Chicago` default)
-
----
-
-## Requirements & Setup
+Requirements & setup
 
 Python 3.9+ recommended.
 
@@ -32,10 +40,10 @@ pandas>=2.0.0
 numpy>=1.25.0
 matplotlib>=3.7.0
 tzdata>=2023.3
-backports.zoneinfo; python_version < “3.9”
+backports.zoneinfo; python_version < "3.9"
 
 Create a venv and install:
-```bash
+
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -43,19 +51,19 @@ pip install -r requirements.txt
 
 ⸻
 
-Data Inputs
+Input formats
 
-Station CSV (climate.af.mil export)
+Station CSV (from climate.af.mil)
 
-Required columns:
+Columns required:
 	•	Date in MM-DD-YYYY
 	•	Time (UTC) in HH:MM
-	•	Air Temp (F) (numeric)
+	•	Air Temp (F) numeric
 
-The script builds August climatology using the last N years found in the file.
+Climatology is computed for your selected month using local time.
 
 Chamber test CSV
-	•	Columns:
+	•	Headers not case sensitive; required columns:
 	•	hour → 0, 0.5, 1.0, …, 23.5 (local time)
 	•	temp → °F
 
@@ -63,276 +71,132 @@ Chamber test CSV
 
 Usage
 
-Single-station overlay (build climo + overlay test)
+Single-station (by path)
 
 python climo_overlay.py \
   --raw "./data/KDLF_ICAO_20150101_20250101.csv" \
   --test "./data/111Ftest.csv" \
   --outdir "./outputs" \
-  --years 10
+  --years 10 \
+  --month 8 \
+  # --average_only           # optional: mean line only (no bands)
 
-Outputs (example):
+Single-station (by 4-letter ID, or multiple IDs)
 
-./outputs/KDLF/aug_climatology_local_2015_2024.csv
-./outputs/KDLF/overlay_chamber_vs_climo.png
-./outputs/KDLF/residuals.png
-./outputs/KDLF/merged_test_vs_climo.csv
-
-
-⸻
-
-Composite across many stations
+Finds the latest matching CSV(s) in --data_dir:
 
 python climo_overlay.py \
-  --raw "./data/KDLF_ICAO_20150101_20250101.csv" \
-  --outdir "./outputs" \
+  --station "KDLF,KEND" \
   --data_dir "./data" \
-  --years 10 \
-  --composite
-
-Composite options
-	•	Overlay a chamber test on the composite:
-
---composite_test "./data/111Ftest.csv"
-
-
-	•	Lines only (no ±1 SD bands):
-
---average_only
-
-
-	•	Filter by station identifiers:
-
---stations "KDLF,KEND"
-
-
-
-⸻
-
-CLI Reference
-
---raw             Path to a station CSV (used to infer defaults and TZ)
---test            Path to chamber test CSV (hour,temp). Required unless --composite.
---outdir          Output directory root (default: ./outputs)
---years           Most recent years to average (default: 10)
---tz              IANA timezone for local hour (default: America/Chicago)
-
---composite       Scan --data_dir for station CSVs and make a composite plot
---data_dir        Directory to scan for station CSVs
---composite_test  Chamber test CSV to overlay on composite
---average_only    Composite: draw mean lines only (hide ±1 SD bands)
---stations        Comma-separated station identifiers (e.g., KDLF,KEND)
-
-
-⸻
-
-Output Structure
-
-outputs/
-  <IDENT>/
-    aug_climatology_local_<START>_<END>.csv
-    overlay_chamber_vs_climo.png
-    residuals.png
-    merged_test_vs_climo.csv
-
-  composite/
-    composite_climo_local_<START>_<END>.csv
-    composite_mean_std_local_<START>_<END>.png
-
-
-⸻
-
-Troubleshooting
-	•	KeyError: 'hour': Check your test CSV has hour,temp headers.
-	•	[WARN] Skipping ...: 'Date': That’s your test CSV; it’s normal to skip in composite mode.
-	•	Empty August data: Ensure your station file covers August and has required columns.
-	•	Wrong timezone: Use --tz "America/Denver" or similar.
-
-⸻
-
-Roadmap
-	•	--month switch instead of fixed August
-	•	--lines_only for single-station overlays
-	•	Multi-month composites
-
----
-
-# SimpleWeather — Hourly Climatology + Chamber Overlay
-
-A small utility to build **hourly temperature climatologies** from **climate.af.mil** station CSVs, convert to **local time**, and optionally **overlay a chamber test profile**. It also supports **composite plots** across many stations at once.
-
----
-
-## What it does
-
-- Build **monthly** (you choose the month) **hourly climatology** per station:
-  - Stats for each local hour (0–23): **mean, std, min, max, 5th, 25th, 75th, 95th percentiles**
-  - Uses the most recent **N years** present in your file (default **10**)
-- **Overlay a chamber test** (24 or 48 points: `hour,temp`), with interpolation of the climatology to your test hours
-- **Composite mode**: scan a directory for **many stations** and plot them together
-  - One **mean line per station**, optional **±1 SD band** per station
-  - Optional **test profile overlay** on the composite
-- **Extreme-days callout** (per selected month): average number of days per year in these buckets, shown only if non‑zero
-  - **100–109°F**, **≥110°F**, **−5 to −9°F**, **≤−10°F**
-
----
-
-## Requirements & setup
-
-**Python 3.9+** recommended.
-
-```
-pandas>=2.0.0
-numpy>=1.25.0
-matplotlib>=3.7.0
-tzdata>=2023.3
-backports.zoneinfo; python_version < "3.9"
-```
-
-Create a venv and install:
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
----
-
-## Input formats
-
-### Station CSV (from climate.af.mil)
-Required columns:
-- `Date` in `MM-DD-YYYY`
-- `Time (UTC)` in `HH:MM`
-- `Air Temp (F)` (numeric)
-
-> The script builds climatology for the **month you select** using the last **N years** found in the file. Time conversion uses **local time** (configurable timezone).
-
-### Chamber test CSV
-- Columns (headers not case sensitive):
-  - `hour` → 0, 0.5, 1.0, …, 23.5 (local time)
-  - `temp` → temperature in °F
-
----
-
-## Usage
-
-### Single-station overlay
-Build a monthly climatology for one station and overlay a chamber test profile.
-
-```bash
-python climo_overlay.py \
-  --raw "./data/KDLF_ICAO_20150101_20250101.csv" \
   --test "./data/111Ftest.csv" \
   --outdir "./outputs" \
   --years 10 \
-  --month 8                # 1=Jan .. 12=Dec
-  # --average_only         # optional: show only the mean line (no bands)
-```
+  --month 8 \
+  # --average_only
 
-**Outputs (example):**
-```
-./outputs/KDLF/aug_climatology_local_2015_2024.csv
-./outputs/KDLF/overlay_chamber_vs_climo.png
-./outputs/KDLF/residuals.png
-./outputs/KDLF/merged_test_vs_climo.csv
-```
-- The **overlay** plot shows the mean line and, unless `--average_only` is set, the **5–95%**, **IQR (25–75%)**, and **±1 SD** bands.
-- A callout box lists average **extreme days** (only categories that are non‑zero for that station/month).
-- The **residuals** plot shows `test − climatology mean` by hour.
+Composite across many stations (auto-discover)
 
-### Composite across many stations
-Scan a directory and auto‑discover station CSVs whose filenames **start with a four‑letter identifier** (e.g., `KDLF_*.csv` or `KDLF-*.csv`).
+Scans --data_dir for files beginning with a 4-letter ID:
 
-```bash
 python climo_overlay.py \
   --outdir "./outputs" \
   --data_dir "./data" \
   --years 10 \
   --month 8 \
   --composite \
-  # --average_only             # optional: lines only (no ±1 SD bands)
-  # --stations "KDLF,KEND"     # optional: limit to selected identifiers
-  # --composite_test "./data/111Ftest.csv"  # optional: overlay chamber test on the composite
-```
+  # --average_only \
+  # --stations "KDLF,KEND" \
+  # --composite_test "./data/111Ftest.csv"
 
-**Outputs (example):**
-```
-./outputs/KCBM/aug_climatology_local_2015_2024.csv
-./outputs/KDLF/aug_climatology_local_2015_2024.csv
-./outputs/KEND/aug_climatology_local_2015_2024.csv
-./outputs/KRND/aug_climatology_local_2015_2024.csv
 
-./outputs/composite/composite_aug_climo_local_2015_2024.csv
-./outputs/composite/composite_aug_mean_std_local_2015_2024.png
-```
-- The composite plot shows **one mean line per station**; add bands by omitting `--average_only`.
-- A callout box summarizes **extreme‑day averages per station** (only non‑zero categories shown).
-- Use `--stations` to restrict to a subset (matches the **first four characters** of filenames).
+⸻
 
----
+Output structure
 
-## Command reference
-
-```
---raw             Path to a station CSV (single‑station mode)
---test            Path to chamber test CSV (hour,temp). Required unless --composite.
---outdir          Output directory root (default: ./outputs)
---years           Most recent years to average (default: 10)
---month           Month number to build climatology for (1=Jan .. 12=Dec). Default: 8 (Aug)
---tz              IANA timezone for local hour (default: America/Chicago)
-
---composite       Scan --data_dir for station CSVs (filenames start with a four‑letter ID) and plot them
---data_dir        Directory to scan for station CSVs
---composite_test  Chamber test CSV to overlay on the composite plot (hour,temp)
---average_only    Draw mean lines only (hide ±1 SD bands) — applies to single‑station and composite
---stations        Comma‑separated station IDs to include (e.g., KDLF,KEND)
-```
-
----
-
-## Output structure
-
-```
 outputs/
-  <IDENT>/
-    <mon>_climatology_local_<START>_<END>.csv
-    overlay_chamber_vs_climo.png          # single‑station only
-    residuals.png                         # single‑station only
-    merged_test_vs_climo.csv              # single‑station only
+  stations/
+    <IDENT>/
+      <mon>/
+        climo.csv
+        <IDENT>_<mon>_overlay.png          # if --test
+        <IDENT>_<mon>_residuals.png        # if --test
+        merged_test_vs_climo.csv           # if --test
 
   composite/
-    composite_<mon>_climo_local_<START>_<END>.csv
-    composite_<mon>_mean_std_local_<START>_<END>.png
-```
-- `<IDENT>` is inferred from the filename prefix (e.g., `KDLF_...csv` → `KDLF`).
-- `<mon>` is the **lowercase month abbreviation** (e.g., `aug`).
-- `<START>_<END>` reflects the climatology window (e.g., `2015_2024`).
+    <mon>/
+      climo.csv
+      composite_<mon>_mean_std_local_<START>_<END>_<N>stns.png
 
----
+	•	<IDENT> is the first 4 characters of the station filename (e.g., KDLF).
+	•	<mon> is the lowercase month abbreviation (e.g., aug).
+	•	<START>_<END> is the climatology window (e.g., 2015_2024).
+	•	Composite PNG includes the month, year span, and station count.
 
-## Implementation notes
+⸻
 
-- **Local time:** All stats are aggregated by **local hour**. Set timezone with `--tz` (default `America/Chicago`).
-- **Interpolation:** For overlays, climatology is linearly interpolated to your test hours.
-- **Robust stats:** Percentiles use **NaN‑safe** calculations; temperature is coerced to numeric.
-- **Station detection (composite):** Only files whose names start with a **four‑letter ID** are processed; others are skipped with an info message.
+Flags (quick reference)
 
----
+--raw             Path to a station CSV (single-station mode)
+--station         Comma-separated 4-letter IDs (single-station mode; uses --data_dir)
+--test            Chamber test CSV (hour,temp). Required unless --composite.
+--outdir          Output directory root (default: ./outputs)
+--data_dir        Directory containing station CSVs (for --station & composite)
+--years           Most recent years to average (default: 10)
+--month           Month number (1=Jan .. 12=Dec). Default: 8 (Aug)
+--tz              IANA timezone for local hour (default: America/Chicago)
 
-## Troubleshooting
+--composite       Enable composite mode (scan --data_dir)
+--stations        Comma-separated station IDs to include (composite filter)
+--composite_test  Chamber test CSV to overlay on composite
+--average_only    Mean line only (hide ±1 SD bands) — applies to both modes
 
-- `KeyError: 'hour'` — Ensure your test CSV has columns `hour,temp` and that hours are numeric (e.g., `0, 0.5, …, 23.5`).
-- `DtypeWarning` on read — We already set `low_memory=False` and explicit dtypes; if you still see one, verify the station CSV has the required columns and no corrupted header rows.
-- Empty month — Confirm your station file contains rows for the requested `--month` and within the chosen `--years` window.
-- Composite skipped a file — The filename must start with a **four‑letter ID**; test profiles like `111Ftest.csv` will be skipped automatically.
 
----
+⸻
 
-## Changelog (recent)
+What the charts show
+	•	Single-station overlay
+	•	Mean line (always)
+	•	Bands (unless --average_only): ±1 SD, IQR (25–75%), 5–95%
+	•	Chamber Profile line (from --test)
+	•	Callout of average extreme days for the station/month (only non-zero bins)
+	•	Residuals bar chart: (test − climatology mean) by hour
+	•	Composite
+	•	One mean line per station
+	•	Optional ±1 SD band per station (omit with --average_only)
+	•	Callout summarizing each station’s non-zero extreme-day bins
+	•	Optional Chamber Profile overlay (--composite_test)
 
-- Added **`--month`** to support any month (not just August)
-- Added **`--average_only`** for both single‑station and composite modes
-- Composite mode now **auto‑discovers** stations by **four‑letter filename prefix** (no `--raw` needed)
-- Added **extreme‑days callout** to both overlay and composite plots
-- Improved dtype handling, robust percentiles, and hour binning
+⸻
+
+Notes & robustness
+	•	Stats aggregate by integer local hour (0–23) to avoid over-fragmenting bins.
+	•	Percentiles use NaN-safe nanpercentile guards.
+	•	CSV reads use explicit dtypes and low_memory=False to avoid mixed-type pitfalls.
+	•	Composite mode skips non-station files and logs an info message.
+
+⸻
+
+Troubleshooting
+	•	KeyError: 'hour'
+Ensure your test CSV has hour,temp and hour is numeric (e.g., 0, 0.5, …, 23.5).
+	•	Dtype warnings
+We set explicit dtypes; if you still see warnings, double-check your station CSV columns and header row.
+	•	Empty month
+Make sure the station CSV contains data for the --month you selected.
+	•	Composite skipped file
+Filenames must begin with a 4-letter ID (e.g., KDLF_*). Test profiles like 111Ftest.csv are skipped on purpose.
+
+⸻
+
+Changelog (recent)
+	•	Added --month (any month)
+	•	--average_only now works in both single-station and composite
+	•	Composite no longer needs --raw; auto-discovers by 4-letter prefix & supports --stations
+	•	Single-station supports --station (ID or comma-separated list) via --data_dir
+	•	Added extreme-days callouts (100–109, ≥110, −5 to −9, ≤−10)
+	•	New output layout and descriptive PNG names
+	•	Stricter dtype handling & NaN-safe percentiles
+
+⸻
+
+If you want, I can also add a --legend_sort option (e.g., by max temp or by 3 pm temp) for composites with lots of stations, or a --month Aug parser that accepts names as well as numbers.

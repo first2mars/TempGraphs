@@ -31,10 +31,10 @@ def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta
     exceed_days = []
     non_exceed_days = []
 
-    # Compute area exceedance for each day
+    # Compute area exceedance for each day via np.trapz
     for date, group in df.groupby(df.index.date):
         observed = group["temp"].values
-        area = np.trapezoid(np.clip(observed - shifted_boundary, 0, None), local_hours)
+        area = np.trapz(np.clip(observed - shifted_boundary, 0, None), local_hours)
         if area > theta_area and len(exceed_days) < 1:
             exceed_days.append((date, observed, area))
         elif area <= theta_area and len(non_exceed_days) < 1:

@@ -1,27 +1,44 @@
 from __future__ import annotations
 
-from reportlab.platypus import Paragraph, Spacer, Image
-from reportlab.lib.styles import getSampleStyleSheet
+try:  # Optional PDF dependencies
+    from reportlab.lib.pagesizes import letter  # type: ignore
+    from reportlab.platypus import (
+        Image,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+    )  # type: ignore
+    from reportlab.lib.styles import getSampleStyleSheet  # type: ignore
 
-styles = getSampleStyleSheet()
+    styles = getSampleStyleSheet()
+    _HAVE_REPORTLAB = True
+except Exception:  # pragma: no cover - environment without reportlab
+    Image = Paragraph = SimpleDocTemplate = Spacer = letter = None  # type: ignore
+    styles = None
+    _HAVE_REPORTLAB = False
 
-# Helper: Add plot image to PDF story if available, else fallback text.
-def add_plot_or_text(story, plot_path, description, width=400, height=250):
-    """
-    Add a plot image to the PDF story if available, otherwise add fallback text.
-    
-    Args:
-        story (list): The PDF story flowables list.
-        plot_path (str or None): Path to the plot image, or None if not generated.
-        description (str): Text to display if no plot is available.
-        width (int): Width of the image in the PDF.
-        height (int): Height of the image in the PDF.
-    """
-    if plot_path:
-        story.append(Image(plot_path, width=width, height=height))
-    else:
-        story.append(Paragraph(f"<b>No exceedance events found for {description}.</b>", styles["Normal"]))
-    story.append(Spacer(1, 12))
+if _HAVE_REPORTLAB:
+    # Helper: Add plot image to PDF story if available, else fallback text.
+    def add_plot_or_text(story, plot_path, description, width=400, height=250):
+        """Add an image to the story or fallback text if missing."""
+        if plot_path:
+            story.append(Image(plot_path, width=width, height=height))
+        else:
+            story.append(
+                Paragraph(
+                    f"<b>No exceedance events found for {description}.</b>",
+                    styles["Normal"],
+                )
+            )
+        story.append(Spacer(1, 12))
+else:
+    def add_plot_or_text(story, plot_path, description, width=400, height=250):
+        """Fallback when reportlab is unavailable; append plain text."""
+        if plot_path:
+            story.append(f"[Image: {plot_path}]")
+        else:
+            story.append(f"No exceedance events found for {description}.")
+
 from pathlib import Path
 def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta_area):
     """
@@ -138,14 +155,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-
-try:
-    from reportlab.lib.pagesizes import letter  # type: ignore
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image  # type: ignore
-    from reportlab.lib.styles import getSampleStyleSheet  # type: ignore
-    _HAVE_REPORTLAB = True
-except Exception:
-    _HAVE_REPORTLAB = False
 
 try:
     # Python 3.9+
@@ -694,7 +703,6 @@ def generate_case_study(
             )
         pdf_path = path("CaseStudy.pdf")
         doc = SimpleDocTemplate(pdf_path, pagesize=letter)
-        styles = getSampleStyleSheet()
         story: List = []
         story.append(Paragraph(f"<b>{report_title}</b>", styles["Title"]))
         story.append(Spacer(1, 12))

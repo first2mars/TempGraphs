@@ -41,7 +41,6 @@ htmlcov/
 
 # --- Project outputs + local data ---
 outputs/
-data/*.csv
 !data/README.md
 
 # --- Logs / temp ---

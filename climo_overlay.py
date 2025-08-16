@@ -358,11 +358,18 @@ def compute_per_year_hourly_means(
     """
     Return a DataFrame [year, hour, mean_temp] for the chosen month, and the
     (start_year, end_year) actually used after clamping to data.
+
+    Only the columns needed for the calculation are loaded to limit memory
+    usage, with explicit dtypes for efficient parsing.
     """
-    df = pd.read_csv(raw_csv)
-    need = {"Date", "Time (UTC)", "Air Temp (F)"}
-    if not need.issubset(df.columns):
-        raise ValueError("Input CSV must contain 'Date', 'Time (UTC)', 'Air Temp (F)'.")
+    df = pd.read_csv(
+        raw_csv,
+        usecols=["Date", "Time (UTC)", "Air Temp (F)"],
+        dtype={"Date": "string", "Time (UTC)": "string", "Air Temp (F)": "float32"},
+        na_values=["", "NA", "NaN", "M", "-", "--", "9999", "9999.9"],
+        keep_default_na=True,
+        low_memory=False,
+    )
 
     from datetime import timezone
     try:

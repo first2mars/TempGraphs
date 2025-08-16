@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import sys
+import pytest
+from datetime import datetime
 
 import pandas as pd
 import numpy as np
@@ -110,3 +112,16 @@ def test_plot_per_year_means(tmp_path):
     df, sy, ey = co.compute_per_year_hourly_means(str(csv_path), month=8, tz_name="UTC", years=2)
     out_png = co.plot_per_year_means(df, ident="TEST", month=8, sy=sy, ey=ey, test_csv=None, outdir=str(tmp_path))
     assert Path(out_png).exists()
+
+
+
+# … existing tests …
+
+def test_build_monthly_climatology_invalid_month(tmp_path):
+    csv_path = make_sample_csv(tmp_path)
+    # Month out of the valid 1–12 range should raise
+    with pytest.raises(ValueError):
+        co.build_monthly_climatology(str(csv_path), month=0, years=1, tz_name="UTC")
+    # Valid month but no matching rows should also raise
+    with pytest.raises(ValueError):
+        co.build_monthly_climatology(str(csv_path), month=7, years=1, tz_name="UTC")

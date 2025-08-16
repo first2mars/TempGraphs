@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from datetime import datetime, timedelta
 import sys
+import pytest
 
 import numpy as np
 import pandas as pd
@@ -113,3 +114,16 @@ def test_generate_case_study(tmp_path):
 def test_parse_months_input():
     months = stats.parse_months_input(["7", "10-2", "5,6"])
     assert months == [1, 2, 5, 6, 7, 10, 11, 12]
+    
+# In tests/test_stats.py (append at the end of the file)
+
+def test_wilson_ci_extremes():
+    # k = 0: p should be 0 and within the confidence interval
+    (ci_low, ci_high), p = stats.wilson_ci(0, 10)
+    assert p == 0.0
+    assert ci_low <= p <= ci_high
+
+    # k = n: p should be 1 and within the confidence interval
+    (ci_low2, ci_high2), p2 = stats.wilson_ci(10, 10)
+    assert p2 == 1.0
+    assert ci_low2 <= p2 <= ci_high2

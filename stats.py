@@ -160,6 +160,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
+import json
 
 import matplotlib
 
@@ -746,6 +747,90 @@ def generate_case_study(
     plt.tight_layout()
     plt.savefig(plot_severity_hist)
     plt.close()
+    
+        # ---- Compact summary exports (for optimizers / comparisons)
+    summary_csv = path("summary.csv")
+    summary_json = path("summary.json")
+
+    def _ci_list(ci_tuple):
+        try:
+            return [float(ci_tuple[0]), float(ci_tuple[1])]
+        except Exception:
+            return [float("nan"), float("nan")]
+
+    summary_rows = [
+        {
+            "station": station,
+            "period": f"{calendar.month_name[month]} {years_label}",
+            "direction": risk_direction,
+            "metric": "risk1_peak" if is_above else "risk1_trough",
+            "k": int(k1),
+            "n": int(n_eval),
+            "p": float(p1),
+            "ci_low": float(ci1_low),
+            "ci_high": float(ci1_high),
+            "threshold_F": float(r1_threshold),
+        },
+        {
+            "station": station,
+            "period": f"{calendar.month_name[month]} {years_label}",
+            "direction": risk_direction,
+            "metric": f"risk2_window_{int(risk2_window_hours)}h",
+            "k": int(k2),
+            "n": int(n_eval),
+            "p": float(p2),
+            "ci_low": float(ci2_low),
+            "ci_high": float(ci2_high),
+            "window_h": float(risk2_window_hours),
+        },
+        {
+            "station": station,
+            "period": f"{calendar.month_name[month]} {years_label}",
+            "direction": risk_direction,
+            "metric": "risk2_area",
+            "k": int(k2_area),
+            "n": int(n_eval),
+            "p": float(p2_area),
+            "ci_low": float(ci2a_low),
+            "ci_high": float(ci2a_high),
+            "area_thresh_Fh": float(risk2_area_thresh),
+        },
+    ]
+    pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
+
+    summary_payload = {
+        "station": station,
+        "period": f"{calendar.month_name[month]} {years_label}",
+        "direction": risk_direction,
+        "n_days": int(n_eval),
+        "risk1": {
+            "metric": "peak" if is_above else "trough",
+            "k": int(k1),
+            "p": float(p1),
+            "ci": _ci_list((ci1_low, ci1_high)),
+            "threshold_F": float(r1_threshold),
+        },
+        "risk2_window": {
+            "hours": float(risk2_window_hours),
+            "k": int(k2),
+            "p": float(p2),
+            "ci": _ci_list((ci2_low, ci2_high)),
+        },
+        "risk2_area": {
+            "threshold_Fh": float(risk2_area_thresh),
+            "k": int(k2_area),
+            "p": float(p2_area),
+            "ci": _ci_list((ci2a_low, ci2a_high)),
+        },
+        "files": {
+            "pdf": path("CaseStudy.pdf"),
+            "risk1_csv": csv_risk1,
+            "risk2_csv": csv_risk2,
+            "severity_hist": plot_severity_hist,
+        },
+    }
+    with open(summary_json, "w", encoding="utf-8") as fh:
+        json.dump(summary_payload, fh, indent=2)
 
     # ---- PDF
     if not _HAVE_REPORTLAB:

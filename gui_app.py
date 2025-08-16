@@ -5,6 +5,7 @@ from tkinter import ttk, filedialog, messagebox
 from dataclasses import asdict
 from zoneinfo import available_timezones
 import os
+import glob
 import calendar
 import pandas as pd
 import numpy as np
@@ -43,9 +44,20 @@ class StatsFrame(ttk.Frame):
         self.auto_direction_var = tk.BooleanVar(value=True)
         self._last_dir = os.getcwd()
 
+        # New: preferred data directory to scan for station CSVs
+        self.data_dir_var = tk.StringVar(value="./data")
+
         row = 0
+        # Data directory (source for station weather CSVs)
+        ttk.Label(self, text="Data Dir").grid(row=row, column=0, sticky="e")
+        ttk.Entry(self, textvariable=self.data_dir_var, width=40).grid(row=row, column=1, sticky="we")
+        ttk.Button(self, text="Browse", command=self._browse_data_dir).grid(row=row, column=2)
+
+        row += 1
+        # Weather CSV is primarily selected by Station ID; combobox shows matches from Data Dir
         ttk.Label(self, text="Weather CSV").grid(row=row, column=0, sticky="e")
-        ttk.Entry(self, textvariable=self.weather_var, width=40).grid(row=row, column=1, sticky="we")
+        self.weather_combo = ttk.Combobox(self, textvariable=self.weather_var, values=[], state="readonly", width=37)
+        self.weather_combo.grid(row=row, column=1, sticky="we")
         ttk.Button(self, text="Browse", command=self._browse_weather).grid(row=row, column=2)
 
         row += 1
@@ -55,7 +67,11 @@ class StatsFrame(ttk.Frame):
 
         row += 1
         ttk.Label(self, text="Station").grid(row=row, column=0, sticky="e")
-        ttk.Entry(self, textvariable=self.station_var).grid(row=row, column=1, sticky="we")
+        e_station = ttk.Entry(self, textvariable=self.station_var)
+        e_station.grid(row=row, column=1, sticky="we")
+        # React to station changes to populate Weather CSV options
+        self.station_var.trace_add("write", lambda *args: self._on_station_changed())
+        self.data_dir_var.trace_add("write", lambda *args: self._on_station_changed())
 
         row += 1
         ttk.Label(self, text="Months").grid(row=row, column=0, sticky="ne")
@@ -135,15 +151,62 @@ class StatsFrame(ttk.Frame):
         self.log.grid(row=row, column=1, columnspan=2, sticky="nsew")
         ttk.Button(self, text="Clear Log", command=self._clear_log).grid(row=row, column=2, sticky="ne")
 
+        # Initial population of weather candidates if station/data_dir pre-filled
+        self._on_station_changed()
+
         for i in range(3):
             self.columnconfigure(i, weight=1)
         self.rowconfigure(row, weight=1)
+
+    def _browse_data_dir(self) -> None:
+        path = filedialog.askdirectory(initialdir=self._last_dir, title="Select data directory")
+        if path:
+            self._last_dir = path
+            self.data_dir_var.set(path)
 
     def _browse_weather(self) -> None:
         path = filedialog.askopenfilename(initialdir=self._last_dir, title="Select weather CSV", filetypes=[("CSV files", "*.csv"), ("All", "*.*")])
         if path:
             self._last_dir = os.path.dirname(path)
             self.weather_var.set(path)
+            # If the file lives inside the current data dir and matches station, include it in combobox
+            stn = (self.station_var.get() or "").strip().upper()
+            if stn and os.path.dirname(path) == os.path.abspath(self.data_dir_var.get()):
+                vals = list(self.weather_combo.cget("values"))
+                if path not in vals:
+                    vals.append(path)
+                    self.weather_combo.configure(values=sorted(vals))
+
+    def _on_station_changed(self) -> None:
+        """Uppercase station and rescan data dir for matching CSVs, selecting the first hit."""
+        stn = self.station_var.get().strip().upper()
+        if stn != self.station_var.get():
+            # write back uppercase without recursive storm: after_idle to avoid re-entrant trace
+            self.after(0, lambda: self.station_var.set(stn))
+        data_dir = self.data_dir_var.get().strip() or "./data"
+        self._populate_weather_candidates(stn, data_dir)
+
+    def _populate_weather_candidates(self, station: str, data_dir: str) -> None:
+        try:
+            candidates: list[str] = []
+            if station and os.path.isdir(data_dir):
+                # Patterns: {STN}_ICAO_*.csv and files containing _{STN}_
+                pat1 = os.path.join(data_dir, f"{station}_ICAO_*.csv")
+                pat2 = os.path.join(data_dir, f"*{station}*.csv")
+                found = set(glob.glob(pat1)) | set(glob.glob(pat2))
+                # Only files
+                candidates = [p for p in sorted(found) if os.path.isfile(p)]
+            # Update combobox
+            self.weather_combo.configure(values=candidates)
+            if candidates:
+                # If current value not in list, set to first
+                if self.weather_var.get() not in candidates:
+                    self.weather_var.set(candidates[0])
+            else:
+                # leave current value as-is but ensure combobox shows empty list
+                pass
+        except Exception as e:
+            self._log(f"[warn] Failed scanning data dir: {e}")
 
     def _browse_boundary(self) -> None:
         path = filedialog.askopenfilename(initialdir=self._last_dir, title="Select boundary CSV", filetypes=[("CSV files", "*.csv"), ("All", "*.*")])
@@ -279,7 +342,14 @@ class StatsFrame(ttk.Frame):
         try:
             weather = self.weather_var.get().strip()
             boundary = self.boundary_var.get().strip()
-            station = self.station_var.get().strip()
+            station = self.station_var.get().strip().upper()
+            # Refresh candidates in case user only typed station then hit Run
+            self._populate_weather_candidates(station, self.data_dir_var.get().strip() or "./data")
+            if not weather and self.weather_combo.cget("values"):
+                # Auto-pick first candidate if empty
+                first = self.weather_combo.cget("values")[0]
+                self.weather_var.set(first)
+                weather = first
             if not weather or not boundary or not station:
                 raise ValueError("Please provide weather, boundary, and station.")
 
@@ -380,6 +450,14 @@ class ClimoOverlayFrame(ttk.Frame):
         ttk.Checkbutton(self, text="Average Only", variable=self.avg_only_var).grid(row=row, column=0, columnspan=2, sticky="w")
 
         row += 1
+        ttk.Label(self, text="Shaded region style").grid(row=row, column=0, sticky="e")
+        self.shade_var = tk.StringVar(value="both")
+        shade_frame = ttk.Frame(self)
+        shade_frame.grid(row=row, column=1, sticky="w")
+        for val, label in [("iqr", "IQR (25–75%)"), ("std", "±1 Std Dev"), ("both", "Both"), ("none", "None")]:
+            ttk.Radiobutton(shade_frame, text=label, value=val, variable=self.shade_var).pack(side=tk.LEFT, padx=4)
+
+        row += 1
         ttk.Button(self, text="Run", command=self._run).grid(row=row, column=0, columnspan=3, pady=5)
 
         row += 1
@@ -473,6 +551,7 @@ class ClimoOverlayFrame(ttk.Frame):
                 station_outdir,
                 title_prefix=title_prefix,
                 average_only=self.avg_only_var.get(),
+                shaded=self.shade_var.get(),
                 extreme_days=climo.attrs.get('extreme_days'),
                 overlay_png_name=f"{ident}_{mon_abbr}_overlay.png",
                 residuals_png_name=f"{ident}_{mon_abbr}_residuals.png",
@@ -483,20 +562,223 @@ class ClimoOverlayFrame(ttk.Frame):
             self._log(f"Error: {exc}")
 
 
+
+# --- CLIMO OVERLAY TAB (for multi-station overlay script) ---
+def climo_overlay_tab(notebook):
+    tab = tk.Frame(notebook)
+    notebook.add(tab, text="Climo Overlay (Multi-Station)")
+
+    # Data directory
+    data_dir_label = tk.Label(tab, text="Data Directory (scan for station CSVs):")
+    data_dir_label.pack(anchor="w")
+    data_dir_var = tk.StringVar(value="./data")
+    data_dir_entry = tk.Entry(tab, width=50, textvariable=data_dir_var)
+    data_dir_entry.pack(anchor="w")
+    def browse_data_dir():
+        d = filedialog.askdirectory(title="Select data directory")
+        if d:
+            data_dir_var.set(d)
+            scan_csvs()
+            update_station_status()
+    tk.Button(tab, text="Browse", command=browse_data_dir).pack(anchor="w")
+
+    # Output directory
+    tk.Label(tab, text="Output Directory:").pack(anchor="w")
+    outdir_entry = tk.Entry(tab, width=50)
+    outdir_entry.insert(0, "./outputs")
+    outdir_entry.pack(anchor="w")
+    def browse_outdir():
+        d = filedialog.askdirectory(title="Select output directory")
+        if d:
+            outdir_entry.delete(0, tk.END)
+            outdir_entry.insert(0, d)
+    tk.Button(tab, text="Browse", command=browse_outdir).pack(anchor="w")
+
+    # Timezone selector
+    tk.Label(tab, text="Timezone:").pack(anchor="w")
+    tz_var = tk.StringVar(value="America/Chicago")
+    ttk.Combobox(tab, textvariable=tz_var, values=sorted(available_timezones())).pack(fill="x")
+
+    # Station IDs input with CSV scan
+    tk.Label(tab, text="Enter Station IDs (comma-separated):").pack(anchor="w")
+    station_var = tk.StringVar()
+    station_entry = tk.Entry(tab, width=50, textvariable=station_var)
+    station_entry.pack(anchor="w")
+    station_status = tk.Label(tab, text="", fg="gray")
+    station_status.pack(anchor="w")
+
+    # Detected CSVs listbox (populated dynamically)
+    csv_label = tk.Label(tab, text="Detected CSV files:")
+    csv_label.pack(anchor="w")
+    csv_listbox = tk.Listbox(tab, selectmode=tk.MULTIPLE, height=6, exportselection=False)
+    csv_listbox.pack(fill="x")
+
+    def scan_csvs():
+        csv_listbox.delete(0, tk.END)
+        try:
+            current_dir = data_dir_var.get()
+            files = [f for f in os.listdir(current_dir) if f.lower().endswith('.csv')]
+        except Exception:
+            files = []
+        for f in sorted(files):
+            csv_listbox.insert(tk.END, f)
+        csv_label.config(text=f"Detected CSV files in {data_dir_var.get() or './data'}:")
+    scan_csvs()
+
+    # Month
+    tk.Label(tab, text="Month (1=Jan, 12=Dec):").pack(anchor="w")
+    month_entry = tk.Entry(tab, width=10)
+    month_entry.insert(0, "8")
+    month_entry.pack(anchor="w")
+
+    # Years
+    tk.Label(tab, text="Years (number of most recent years):").pack(anchor="w")
+    years_entry = tk.Entry(tab, width=10)
+    years_entry.insert(0, "10")
+    years_entry.pack(anchor="w")
+    all_years_var = tk.BooleanVar(value=False)
+    def toggle_years():
+        years_entry.configure(state=(tk.DISABLED if all_years_var.get() else tk.NORMAL))
+    tk.Checkbutton(tab, text="Use all available years", variable=all_years_var, command=toggle_years).pack(anchor="w")
+    toggle_years()
+
+    # Mode and options
+    composite_var = tk.BooleanVar(value=True)
+    avgonly_var = tk.BooleanVar(value=False)
+    peryear_var = tk.BooleanVar(value=False)
+    def on_mode_toggle():
+        peryear_chk.configure(state=(tk.DISABLED if composite_var.get() else tk.NORMAL))
+    tk.Checkbutton(tab, text="Composite (combine stations)", variable=composite_var, command=on_mode_toggle).pack(anchor="w")
+    tk.Checkbutton(tab, text="Average only (hide bands)", variable=avgonly_var).pack(anchor="w")
+    peryear_chk = tk.Checkbutton(tab, text="Per-year curves (single-station mode)", variable=peryear_var)
+    peryear_chk.pack(anchor="w")
+    on_mode_toggle()
+
+    # Shaded region style
+    tk.Label(tab, text="Shaded region style:").pack(anchor="w")
+    shade_var = tk.StringVar(value="both")
+    shade_row = tk.Frame(tab)
+    shade_row.pack(anchor="w")
+    for val, label in [("iqr", "IQR (25–75%)"), ("std", "±1 Std Dev"), ("both", "Both"), ("none", "None")]:
+        tk.Radiobutton(shade_row, text=label, variable=shade_var, value=val).pack(side=tk.LEFT, padx=4)
+
+    # Optional chamber test CSV
+    tk.Label(tab, text="Chamber Test CSV (optional, hour,temp):").pack(anchor="w")
+    test_entry = tk.Entry(tab, width=50)
+    test_entry.pack(anchor="w")
+    def browse_test_csv():
+        f = filedialog.askopenfilename(title="Select test CSV", filetypes=[("CSV files", "*.csv"), ("All", "*.*")])
+        if f:
+            test_entry.delete(0, tk.END)
+            test_entry.insert(0, f)
+    tk.Button(tab, text="Browse Test CSV", command=browse_test_csv).pack(anchor="w")
+
+    # Helpers
+    def station_id_exists(stn: str, directory: str) -> bool:
+        stn = (stn or '').strip().upper()
+        if not stn or not os.path.isdir(directory):
+            return False
+        try:
+            for name in os.listdir(directory):
+                if not name.lower().endswith('.csv'):
+                    continue
+                if name[:4].upper() == stn:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def update_station_status(*_):
+        ids = [s.strip().upper() for s in (station_var.get() or '').split(',') if s.strip()]
+        found, missing = [], []
+        d = data_dir_var.get()
+        for s in ids:
+            (found if station_id_exists(s, d) else missing).append(s)
+        msg_parts = []
+        if found:
+            msg_parts.append("Found: " + ", ".join(found))
+        if missing:
+            msg_parts.append("Missing: " + ", ".join(missing))
+        station_status.config(text=" | ".join(msg_parts) if msg_parts else '')
+
+    station_var.trace_add('write', update_station_status)
+    data_dir_var.trace_add('write', lambda *_: (scan_csvs(), update_station_status()))
+
+    # Runner
+    def run_climo_overlay():
+        try:
+            outdir = outdir_entry.get().strip()
+            data_dir = data_dir_var.get().strip() or './data'
+            if not outdir:
+                messagebox.showerror('Error', 'Please provide an output directory.')
+                return
+            month = int(month_entry.get())
+            years = (9999 if all_years_var.get() else int(years_entry.get()))
+            station_ids = [s.strip().upper() for s in (station_var.get() or '').split(',') if s.strip()]
+            if not station_ids and csv_listbox.curselection():
+                selected = [csv_listbox.get(i) for i in csv_listbox.curselection()]
+                station_ids = [os.path.splitext(f)[0].split('_')[0].upper() for f in selected]
+            if not station_ids:
+                messagebox.showerror('Error', 'Please enter at least one station ID or select CSV files.')
+                return
+            test_csv = test_entry.get().strip()
+            cmd = [
+                'python', 'climo_overlay.py',
+                '--month', str(month),
+                '--years', str(years),
+                '--data_dir', data_dir,
+                '--outdir', outdir,
+                '--tz', tz_var.get(),
+                '--shade', shade_var.get(),
+            ]
+            if composite_var.get():
+                cmd += ['--composite', '--stations', ','.join(station_ids)]
+                if test_csv:
+                    cmd += ['--composite_test', test_csv]
+            else:
+                cmd += ['--station', ','.join(station_ids)]
+                if test_csv:
+                    cmd += ['--test', test_csv]
+                if peryear_var.get():
+                    cmd += ['--per_year']
+            import subprocess
+            subprocess.Popen(cmd)
+            messagebox.showinfo('Started', f'Climo overlay script started.\nCheck {outdir} for results.')
+        except Exception as exc:
+            messagebox.showerror('Error', str(exc))
+
+    tk.Button(tab, text="Run Climo Overlay", command=run_climo_overlay).pack(pady=6)
+    update_station_status()
+
 def main() -> None:
     root = tk.Tk()
     root.title("TempGraphs")
+
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True)
 
+    # Stats tab
     stats_frame = StatsFrame(notebook)
     notebook.add(stats_frame, text="Stats")
 
+    # Single-station climo overlay tab
     climo_frame = ClimoOverlayFrame(notebook)
     notebook.add(climo_frame, text="Climo Overlay")
+
+    # Multi-station climo overlay tab (script wrapper)
+    climo_overlay_tab(notebook)
 
     root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        print("[INFO] Launching TempGraphs GUI…")
+        main()
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        try:
+            messagebox.showerror("Startup Error", str(exc))
+        except Exception:
+            pass

@@ -125,6 +125,7 @@ def build_monthly_climatology(
 
 def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: str,
                         title_prefix: str = "Del Rio AFB (KDLF)", average_only: bool = False,
+                        shaded: str = "both",
                         extreme_days: dict | None = None,
                         overlay_png_name: str | None = None,
                         residuals_png_name: str | None = None):
@@ -149,10 +150,13 @@ def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: 
     p95 = merged["p95"]
 
     plt.figure(figsize=(13, 6.5))
-    if not average_only:
-        plt.fill_between(x, p05, p95, alpha=0.12, label="5–95%", zorder=1)
-        plt.fill_between(x, p25, p75, alpha=0.25, label="25–75% (IQR)", zorder=1)
-        plt.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.20, label="±1 Std Dev", zorder=1)
+    if not average_only and shaded != "none":
+        if shaded in ("both", "iqr"):
+            plt.fill_between(x, p25, p75, alpha=0.25, label="25–75% (IQR)", zorder=1)
+        if shaded in ("both", "std"):
+            plt.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.20, label="±1 Std Dev", zorder=1)
+        if shaded == "both":
+            plt.fill_between(x, p05, p95, alpha=0.12, label="5–95%", zorder=1)
     plt.plot(x, y_mean, label="Mean Temp (°F)", zorder=2)
     plt.plot(x, y_test, linewidth=2.5, marker="o", label="Chamber Profile", zorder=3)
 
@@ -221,6 +225,7 @@ def plot_composite_mean_std(
     out_png: str,
     title_suffix: str = "",
     average_only: bool = False,
+    shaded: str = "both",
     extremes_by_ident: dict[str, dict] | None = None,
     test: pd.DataFrame | None = None,
 ):
@@ -236,6 +241,7 @@ def plot_composite_mean_std(
     x = df["hour_local"].to_numpy(float)
     drew_iqr_band = False
     drew_p95_band = False
+    drew_std_band = False
     for ident in station_ids:
         mean_col = f"{ident}_mean"
         std_col = f"{ident}_std"
@@ -243,19 +249,21 @@ def plot_composite_mean_std(
             continue
         y = df[mean_col].to_numpy(float)
         plt.plot(x, y, label=ident, zorder=2)
-        if not average_only:
+        if not average_only and shaded != "none":
             p25_col = f"{ident}_p25"
             p75_col = f"{ident}_p75"
             p05_col = f"{ident}_p05"
             p95_col = f"{ident}_p95"
-            # 25–75% (IQR)
-            if p25_col in df.columns and p75_col in df.columns:
+            if shaded in ("both", "iqr") and p25_col in df.columns and p75_col in df.columns:
                 q25 = df[p25_col].to_numpy(float)
                 q75 = df[p75_col].to_numpy(float)
                 plt.fill_between(x, q25, q75, alpha=0.25, zorder=1)
                 drew_iqr_band = True
-            # 5–95% range
-            if p05_col in df.columns and p95_col in df.columns:
+            if shaded in ("both", "std") and std_col in df.columns:
+                s = df[std_col].to_numpy(float)
+                plt.fill_between(x, y - s, y + s, alpha=0.20, zorder=1)
+                drew_std_band = True
+            if shaded == "both" and p05_col in df.columns and p95_col in df.columns:
                 q05 = df[p05_col].to_numpy(float)
                 q95 = df[p95_col].to_numpy(float)
                 plt.fill_between(x, q05, q95, alpha=0.12, zorder=1)
@@ -319,6 +327,8 @@ def plot_composite_mean_std(
     # Add patches for shaded regions if drawn
     if drew_iqr_band:
         handles.append(Patch(facecolor='gray', alpha=0.25, label='25–75% (IQR)'))
+    if drew_std_band:
+        handles.append(Patch(facecolor='gray', alpha=0.20, label='±1 Std Dev'))
     if drew_p95_band:
         handles.append(Patch(facecolor='gray', alpha=0.12, label='5–95% Range'))
     if len(handles) != len(labels):
@@ -487,6 +497,8 @@ def main():
     ap.add_argument("--data_dir", help="Directory to scan for station CSVs")
     ap.add_argument("--composite_test", help="Chamber test CSV to overlay on composite")
     ap.add_argument("--average_only", action="store_true", help="Draw mean lines only (hide ±1 SD bands)")
+    ap.add_argument("--shade", choices=["iqr", "std", "both", "none"], default="both",
+                    help="Shaded band style for climatology (default: both)")
     ap.add_argument("--stations", help="Comma-separated station identifiers (e.g., KDLF,KEND)")
     ap.add_argument("--station", help="Single-station mode: comma-separated 4-letter IDs (e.g., KDLF or KDLF,KEND). Requires --data_dir if --raw is not provided. If both --raw and --station are provided, --raw takes priority.")
     ap.add_argument(
@@ -581,6 +593,7 @@ def main():
             composite_df, composite_png,
             title_suffix=title_suffix,
             average_only=args.average_only,
+            shaded=args.shade,
             extremes_by_ident=extremes_by_ident,
             test=test_df_for_composite,
         )
@@ -682,6 +695,7 @@ def main():
                     test, climo_interp, station_outdir,
                     title_prefix=title_prefix,
                     average_only=args.average_only,
+                    shaded=args.shade,
                     extreme_days=climo.attrs.get('extreme_days'),
                     overlay_png_name=overlay_png_name,
                     residuals_png_name=residuals_png_name,

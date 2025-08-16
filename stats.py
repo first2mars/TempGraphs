@@ -65,6 +65,15 @@ def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
 
+    # Determine if there are any exceedance days
+    risk2_count = len(exceed_days)
+
+    # Caption/annotation logic
+    if risk2_count == 0:
+        fig.suptitle("Risk 2 Example (no exceedance events found; shown is the closest day to threshold)", fontsize=14, fontweight="bold")
+    else:
+        fig.suptitle("Risk 2 Example Exceedance", fontsize=14, fontweight="bold")
+
     if exceed_days:
         date, observed, area = exceed_days[0]
         axes[0].plot(local_hours, observed, label=f"Observed {date}", color="blue")

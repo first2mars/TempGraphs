@@ -22,6 +22,62 @@ def add_plot_or_text(story, plot_path, description, width=400, height=250):
     else:
         story.append(Paragraph(f"<b>No exceedance events found for {description}.</b>", styles["Normal"]))
     story.append(Spacer(1, 12))
+from pathlib import Path
+def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta_area):
+    """
+    Plot example days showing exceedance and non-exceedance for area-under-curve thermal load.
+    """
+    local_hours = np.arange(24)
+    exceed_days = []
+    non_exceed_days = []
+
+    # Compute area exceedance for each day
+    for date, group in df.groupby(df.index.date):
+        observed = group["temp"].values
+        area = np.trapz(np.clip(observed - shifted_boundary, 0, None), local_hours)
+        if area > theta_area and len(exceed_days) < 1:
+            exceed_days.append((date, observed, area))
+        elif area <= theta_area and len(non_exceed_days) < 1:
+            non_exceed_days.append((date, observed, area))
+        if len(exceed_days) and len(non_exceed_days):
+            break
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+    if exceed_days:
+        date, observed, area = exceed_days[0]
+        axes[0].plot(local_hours, observed, label=f"Observed {date}", color="blue")
+        axes[0].plot(local_hours, shifted_boundary, label="Shifted Boundary", color="red")
+        axes[0].fill_between(local_hours, shifted_boundary, observed,
+                             where=observed > shifted_boundary, color="blue", alpha=0.3)
+        axes[0].set_title("Exceedance Example")
+        axes[0].legend()
+        axes[0].annotate(f"A⁺ = {area:.1f} °F·h\nθ = {theta_area} °F·h",
+                         xy=(0.05, 0.9), xycoords="axes fraction", fontsize=10,
+                         bbox=dict(facecolor="white", alpha=0.7))
+
+    if non_exceed_days:
+        date, observed, area = non_exceed_days[0]
+        axes[1].plot(local_hours, observed, label=f"Observed {date}", color="blue")
+        axes[1].plot(local_hours, shifted_boundary, label="Shifted Boundary", color="red")
+        axes[1].fill_between(local_hours, shifted_boundary, observed,
+                             where=observed > shifted_boundary, color="blue", alpha=0.3)
+        axes[1].set_title("Non-exceedance Example")
+        axes[1].legend()
+        axes[1].annotate(f"A⁺ = {area:.1f} °F·h\nθ = {theta_area} °F·h",
+                         xy=(0.05, 0.9), xycoords="axes fraction", fontsize=10,
+                         bbox=dict(facecolor="white", alpha=0.7))
+
+    for ax in axes:
+        ax.set_xlabel("Local Hour")
+        ax.set_ylabel("Temp (°F)")
+        ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    outfile = Path(outdir) / f"{station}_{month:02d}_risk2_area_examples.png"
+    fig.savefig(outfile, dpi=150)
+    plt.close(fig)
+    return outfile
 """
 stats.py — Temperature vs Boundary Case Study Generator
 
@@ -203,6 +259,7 @@ def generate_case_study(
     years: List[int],
     tz_name: str = "America/Los_Angeles",
     risk2_window_hours: float = 2.0,
+    risk2_area_thresh: float = 10.0,
     outdir: str | None = None,
     report_title: str | None = None,
 ) -> CaseStudyOutputs:
@@ -342,6 +399,11 @@ def generate_case_study(
 
     (ci2_low, ci2_high), p2 = wilson_ci(k2, n_days_mon)
 
+    # Area-based Risk 2: thermal load exceedance using degree-hours threshold
+    degree_hours_arr = np.array(degree_hours, dtype=float)
+    k2_area = int(np.sum(degree_hours_arr > risk2_area_thresh))
+    (ci2a_low, ci2a_high), p2_area = wilson_ci(k2_area, n_days_mon)
+
     # ---- File name helpers
     # Year label based on data actually present after filtering
     sorted_years = present_years
@@ -373,7 +435,7 @@ def generate_case_study(
 
     # Risk 2 day results
     r2_rows: List[Dict] = []
-    for d in dates:
+    for idx, d in enumerate(dates):
         obs_vec = daily_obs[d]
         obs_peak_idx = int(np.nanargmax(obs_vec))
         step = obs_peak_idx - bnd_peak_idx
@@ -400,6 +462,7 @@ def generate_case_study(
             "best_window_mean_margin_F": best_mean if exceed_win else 0.0,
             "degree_hours_above_boundary": degree_hrs,
             "risk2_window_hours": risk2_window_hours,
+            "exceed_area_threshold": bool(degree_hrs > risk2_area_thresh),
         })
     df_r2 = pd.DataFrame(r2_rows)
     csv_risk2 = path(f"risk2_{int(risk2_window_hours)}h.csv")
@@ -484,6 +547,9 @@ def generate_case_study(
     # Severity histogram
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.hist(degree_hours, bins=12, edgecolor="black")
+    if risk2_area_thresh and risk2_area_thresh > 0:
+        ax.axvline(risk2_area_thresh, linestyle="--", linewidth=2, label=f"Threshold {risk2_area_thresh:.1f} °F·h")
+        ax.legend()
     ax.set_xlabel("Degree-hours above boundary (°F·h)")
     ax.set_ylabel("Days")
     ax.set_title(f"Thermal Loading Severity ({station} {years_label}-{month:02d})")
@@ -537,6 +603,16 @@ def generate_case_study(
                 styles["BodyText"],
             )
         )
+        story.append(
+            Paragraph(
+                (
+                    f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_days_mon} days had total positive degree-hours above the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after peak alignment). "
+                    f"The estimated probability over {period_desc} is <b>{p2_area * 100:.1f}%</b>. "
+                    f"With 95% confidence, the true probability lies between <b>{ci2a_low * 100:.1f}%</b> and <b>{ci2a_high * 100:.1f}%</b>."
+                ),
+                styles["BodyText"],
+            )
+        )
         story.append(Spacer(1, 12))
         story.append(Image(plot_severity_hist, width=400, height=250))
         story.append(Spacer(1, 12))
@@ -546,6 +622,66 @@ def generate_case_study(
         add_plot_or_text(story, plot_risk1_stacked, "Risk 1 (stacked)")
         add_plot_or_text(story, plot_risk2_examples, "Risk 2 (examples)")
         add_plot_or_text(story, plot_risk2_stacked, "Risk 2 (stacked)")
+        # --- Add Risk 2 area examples plot to PDF ---
+        # For this, we need to reconstruct a dataframe with the appropriate columns.
+        # The inputs: daily_obs (dict of date -> 48-vector), bnd_vec (boundary on grid)
+        # We'll use the same peak alignment as for risk2, for consistency.
+        # Compose a DataFrame for plotting examples
+        df_area_plot = []
+        for d in dates:
+            obs_vec = daily_obs[d]
+            obs_peak_idx = int(np.nanargmax(obs_vec))
+            step = obs_peak_idx - bnd_peak_idx
+            bnd_shifted = np.roll(bnd_vec, step)
+            # For area, we consider only the 24-hourly values for visual clarity
+            # Interpolate to hourly grid
+            hour_grid = np.arange(24)
+            obs_hourly = np.interp(hour_grid, grid, obs_vec)
+            bnd_hourly = np.interp(hour_grid, grid, bnd_shifted)
+            df_area_plot.append(
+                {
+                    "date": d,
+                    "temp": obs_hourly,
+                    "shifted_boundary": bnd_hourly,
+                }
+            )
+        # Build a DataFrame with multi-index: (date, hour)
+        df_area = []
+        for row in df_area_plot:
+            for h in range(24):
+                df_area.append(
+                    {
+                        "date": row["date"],
+                        "hour": h,
+                        "temp": row["temp"][h],
+                        "shifted_boundary": row["shifted_boundary"][h],
+                    }
+                )
+        df_area = pd.DataFrame(df_area)
+        # Pivot to get one day's temps as a vector (needed for plotting function)
+        # For each day, get the 24-hour vector
+        day_groups = {}
+        for d, g in df_area.groupby("date"):
+            arr = np.array([g.loc[g["hour"] == h, "temp"].values[0] for h in range(24)])
+            bnd = np.array([g.loc[g["hour"] == h, "shifted_boundary"].values[0] for h in range(24)])
+            day_groups[d] = (arr, bnd)
+        # For plotting, we need a DataFrame with index as datetime (date), column "temp"
+        # We'll pick the first shifted_boundary (since they're all aligned for each day).
+        # We'll pass the DataFrame with index as datetime, column "temp", and the shifted_boundary as a vector
+        # Use the first day's boundary as example
+        if len(day_groups) > 0:
+            # Build df for plotting
+            rows = []
+            for d, (obs, bnd) in day_groups.items():
+                for h in range(24):
+                    rows.append({"datetime": pd.Timestamp(d) + pd.Timedelta(hours=h), "temp": obs[h]})
+            df_plot = pd.DataFrame(rows).set_index("datetime")
+            # Use the first day's shifted boundary for plotting (they are all aligned)
+            shifted_boundary = list(day_groups.values())[0][1]
+            risk2_area_examples_file = plot_risk2_area_examples(
+                df_plot, shifted_boundary, station, month, outdir, theta_area=risk2_area_thresh
+            )
+            add_plot_or_text(story, str(risk2_area_examples_file), "Risk 2 (Area Examples)")
 
         doc.build(story)
 
@@ -573,6 +709,12 @@ def generate_case_study(
                 "p": p2,
                 "ci": (ci2_low, ci2_high),
                 "window_h": risk2_window_hours,
+            },
+            "risk2_area": {
+                "k": k2_area,
+                "p": p2_area,
+                "ci": (ci2a_low, ci2a_high),
+                "threshold_Fh": risk2_area_thresh,
             },
         },
     )
@@ -654,6 +796,12 @@ def main() -> None:
         help="Window length for Risk 2 (hours)",
     )
     parser.add_argument(
+        "--risk2-area-thresh",
+        type=float,
+        default=10.0,
+        help="Area-based thermal load threshold in degree-hours (°F·h) for Risk 2 (area). Default: 10.0",
+    )
+    parser.add_argument(
         "--outdir", default="./outputs", help="Output directory"
     )
     parser.add_argument(
@@ -687,6 +835,7 @@ def main() -> None:
             years=years,
             tz_name=args.tz,
             risk2_window_hours=args.risk2_hours,
+            risk2_area_thresh=args.risk2_area_thresh,
             outdir=args.outdir,
             report_title=title,
         )
@@ -700,6 +849,7 @@ def main() -> None:
         print("Risk2 stacked:", outputs.plot_risk2_stacked)
         print("Severity histogram:", outputs.plot_severity_hist)
         print("Stats:", outputs.stats)
+        print("Risk2 area threshold (°F·h):", args.risk2_area_thresh)
 
 
 if __name__ == "__main__":

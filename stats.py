@@ -40,18 +40,22 @@ else:
             story.append(f"No exceedance events found for {description}.")
 
 from pathlib import Path
-def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta_area):
+def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta_area, direction="above"):
     """
     Plot example days showing exceedance and non-exceedance for area-under-curve thermal load.
+    direction: "above" (hot) or "below" (cold); controls whether area is computed above or below the boundary.
     """
     local_hours = np.arange(24)
     exceed_days = []
     non_exceed_days = []
 
-    # Compute area exceedance for each day via np.trapz
+    # Compute area exceedance for each day via np.trapezoid
     for date, group in df.groupby(df.index.date):
         observed = group["temp"].values
-        area = np.trapz(np.clip(observed - shifted_boundary, 0, None), local_hours)
+        if direction == "above":
+            area = np.trapezoid(np.clip(observed - shifted_boundary, 0, None), local_hours)
+        else:
+            area = np.trapezoid(np.clip(shifted_boundary - observed, 0, None), local_hours)
         if area > theta_area and len(exceed_days) < 1:
             exceed_days.append((date, observed, area))
         elif area <= theta_area and len(non_exceed_days) < 1:
@@ -65,8 +69,8 @@ def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta
         date, observed, area = exceed_days[0]
         axes[0].plot(local_hours, observed, label=f"Observed {date}", color="blue")
         axes[0].plot(local_hours, shifted_boundary, label="Shifted Boundary", color="red")
-        axes[0].fill_between(local_hours, shifted_boundary, observed,
-                             where=observed > shifted_boundary, color="blue", alpha=0.3)
+        cond0 = (observed > shifted_boundary) if direction == "above" else (observed < shifted_boundary)
+        axes[0].fill_between(local_hours, shifted_boundary, observed, where=cond0, color="blue", alpha=0.3)
         axes[0].set_title("Exceedance Example")
         axes[0].legend()
         axes[0].annotate(f"A⁺ = {area:.1f} °F·h\nθ = {theta_area} °F·h",
@@ -77,8 +81,8 @@ def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta
         date, observed, area = non_exceed_days[0]
         axes[1].plot(local_hours, observed, label=f"Observed {date}", color="blue")
         axes[1].plot(local_hours, shifted_boundary, label="Shifted Boundary", color="red")
-        axes[1].fill_between(local_hours, shifted_boundary, observed,
-                             where=observed > shifted_boundary, color="blue", alpha=0.3)
+        cond1 = (observed > shifted_boundary) if direction == "above" else (observed < shifted_boundary)
+        axes[1].fill_between(local_hours, shifted_boundary, observed, where=cond1, color="blue", alpha=0.3)
         axes[1].set_title("Non-exceedance Example")
         axes[1].legend()
         axes[1].annotate(f"A⁺ = {area:.1f} °F·h\nθ = {theta_area} °F·h",
@@ -362,6 +366,7 @@ def generate_case_study(
     tz_name: str = "America/Los_Angeles",
     risk2_window_hours: float = 2.0,
     risk2_area_thresh: float = 10.0,
+    risk_direction: str = "above",
     outdir: str | None = None,
     report_title: str | None = None,
     qc_min_range_f: float = 2.0,
@@ -456,6 +461,13 @@ def generate_case_study(
     bnd_peak_idx = int(np.nanargmax(bnd_vec))
     bnd_peak_temp = float(np.nanmax(bnd_vec))
 
+    # Direction-aware settings
+    is_above = (risk_direction == "above")
+    # For Risk 1, compare to boundary peak (hot) or trough (cold)
+    bnd_trough_idx = int(np.nanargmin(bnd_vec))
+    bnd_trough_temp = float(np.nanmin(bnd_vec))
+    r1_threshold = bnd_peak_temp if is_above else bnd_trough_temp
+
     dates = sorted(daily_obs.keys())
     n_eval = len(dates)
     if n_eval != n_days_qc:
@@ -464,8 +476,13 @@ def generate_case_study(
     # ---- Risk 1: daily peak vs boundary peak (no shift)
     k1 = 0
     for d in dates:
-        obs_peak = float(np.nanmax(daily_obs[d]))
-        if obs_peak > bnd_peak_temp:
+        if is_above:
+            obs_ext = float(np.nanmax(daily_obs[d]))
+            exceed = obs_ext > r1_threshold
+        else:
+            obs_ext = float(np.nanmin(daily_obs[d]))
+            exceed = obs_ext < r1_threshold
+        if exceed:
             k1 += 1
     (ci1_low, ci1_high), p1 = wilson_ci(k1, n_eval)
 
@@ -487,18 +504,31 @@ def generate_case_study(
     for d in dates:
         obs_vec = daily_obs[d]
         # R1 examples
-        if ex_day_r1 is None and float(np.nanmax(obs_vec)) > bnd_peak_temp:
-            ex_day_r1 = d
-        if nx_day_r1 is None and float(np.nanmax(obs_vec)) <= bnd_peak_temp:
-            nx_day_r1 = d
+        if is_above:
+            obs_ext = float(np.nanmax(obs_vec))
+            if ex_day_r1 is None and obs_ext > r1_threshold:
+                ex_day_r1 = d
+            if nx_day_r1 is None and obs_ext <= r1_threshold:
+                nx_day_r1 = d
+        else:
+            obs_ext = float(np.nanmin(obs_vec))
+            if ex_day_r1 is None and obs_ext < r1_threshold:
+                ex_day_r1 = d
+            if nx_day_r1 is None and obs_ext >= r1_threshold:
+                nx_day_r1 = d
 
-        # Peak alignment for R2
-        obs_peak_idx = int(np.nanargmax(obs_vec))
-        step = obs_peak_idx - bnd_peak_idx
+        # Align extremes: peak for hot (above), trough for cold (below)
+        if is_above:
+            obs_ext_idx = int(np.nanargmax(obs_vec))
+            step = obs_ext_idx - bnd_peak_idx
+        else:
+            obs_ext_idx = int(np.nanargmin(obs_vec))
+            step = obs_ext_idx - bnd_trough_idx
         bnd_shifted = np.roll(bnd_vec, step)
-        margin = obs_vec - bnd_shifted
+        # Margin is positive when the day violates the boundary criterion
+        margin = (obs_vec - bnd_shifted) if is_above else (bnd_shifted - obs_vec)
 
-        # degree‑hours above boundary
+        # degree‑hours above/below boundary
         degree_hours.append(float(np.sum(np.clip(margin, 0, None)) * 0.5))
 
         # contiguous window check
@@ -514,7 +544,8 @@ def generate_case_study(
 
         if exceed_win:
             r2_exceed_dates.append(d)
-        if float(np.nanmax(obs_vec)) > bnd_peak_temp:
+        # For R1 stacked, add days that exceed the threshold
+        if (is_above and float(np.nanmax(obs_vec)) > r1_threshold) or (not is_above and float(np.nanmin(obs_vec)) < r1_threshold):
             r1_exceed_dates.append(d)
 
     (ci2_low, ci2_high), p2 = wilson_ci(k2, n_eval)
@@ -540,15 +571,25 @@ def generate_case_study(
 
     # ---- CSVs
     # Risk 1 day results
-    r1_rows = [
-        {
+    r1_rows = []
+    for d in dates:
+        obs_peak = float(np.nanmax(daily_obs[d]))
+        obs_trough = float(np.nanmin(daily_obs[d]))
+        if is_above:
+            obs_ext = obs_peak
+            exceed = obs_ext > r1_threshold
+        else:
+            obs_ext = obs_trough
+            exceed = obs_ext < r1_threshold
+        r1_rows.append({
             "date": d,
-            "obs_peak_F": float(np.nanmax(daily_obs[d])),
+            "obs_peak_F": obs_peak,
+            "obs_trough_F": obs_trough,
             "bnd_peak_F": bnd_peak_temp,
-            "exceed": float(np.nanmax(daily_obs[d])) > bnd_peak_temp,
-        }
-        for d in dates
-    ]
+            "bnd_trough_F": bnd_trough_temp,
+            "threshold_F": r1_threshold,
+            "exceed": exceed,
+        })
     df_r1 = pd.DataFrame(r1_rows)
     csv_risk1 = path("risk1_daily_peaks.csv")
     df_r1.to_csv(csv_risk1, index=False)
@@ -557,10 +598,15 @@ def generate_case_study(
     r2_rows: List[Dict] = []
     for idx, d in enumerate(dates):
         obs_vec = daily_obs[d]
-        obs_peak_idx = int(np.nanargmax(obs_vec))
-        step = obs_peak_idx - bnd_peak_idx
+        # Align extremes as above
+        if is_above:
+            obs_ext_idx = int(np.nanargmax(obs_vec))
+            step = obs_ext_idx - bnd_peak_idx
+        else:
+            obs_ext_idx = int(np.nanargmin(obs_vec))
+            step = obs_ext_idx - bnd_trough_idx
         bnd_shifted = np.roll(bnd_vec, step)
-        margin = obs_vec - bnd_shifted
+        margin = (obs_vec - bnd_shifted) if is_above else (bnd_shifted - obs_vec)
         degree_hrs = float(np.sum(np.clip(margin, 0, None)) * 0.5)
         exceed_win = any(
             np.all(margin[i:i + win_steps] > 0) for i in range(0, len(margin) - win_steps + 1)
@@ -580,7 +626,7 @@ def generate_case_study(
             "exceed_window": exceed_win,
             "best_window_start_local_hr": best_start if exceed_win else float('nan'),
             "best_window_mean_margin_F": best_mean if exceed_win else 0.0,
-            "degree_hours_above_boundary": degree_hrs,
+            "degree_hours_beyond_boundary": degree_hrs,
             "risk2_window_hours": risk2_window_hours,
             "exceed_area_threshold": bool(degree_hrs > risk2_area_thresh),
         })
@@ -607,7 +653,7 @@ def generate_case_study(
         for ax, day, title in zip(axes, [ex_day_r1, nx_day_r1], ["Exceedance Example", "Non-exceedance Example"]):
             obs = daily_obs[day]
             ax.plot(grid_hours, obs, linewidth=2, label=f"Observed {day}")
-            ax.axhline(bnd_peak_temp, color="red", linestyle="--", label="Boundary peak temp")
+            ax.axhline(r1_threshold, color="red", linestyle="--", label=("Boundary peak temp" if is_above else "Boundary trough temp"))
             ax.set_title(title)
             ax.set_xlabel("Local Hour")
             ax.set_ylabel("Temp (°F)")
@@ -622,7 +668,7 @@ def generate_case_study(
     fig, ax = plt.subplots(figsize=(10, 6))
     for d in r1_exceed_dates:
         ax.plot(grid, daily_obs[d], alpha=0.5)
-    ax.axhline(bnd_peak_temp, color="red", linestyle="--", linewidth=2, label="Boundary peak temp")
+    ax.axhline(r1_threshold, color="red", linestyle="--", linewidth=2, label=("Boundary peak temp" if is_above else "Boundary trough temp"))
     ax.set_title(f"Risk 1: Observed Curves on Exceedance Days ({station} {years_label}-{month:02d})")
     ax.set_xlabel("Local Hour")
     ax.set_ylabel("Temp (°F)")
@@ -639,10 +685,14 @@ def generate_case_study(
         fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
         for ax, day, title in zip(axes, [ex_day_r2, nx_day_r2], ["Exceedance Example", "Non-exceedance Example"]):
             obs = daily_obs[day]
-            obs_peak_idx = int(np.nanargmax(obs))
-            step = obs_peak_idx - bnd_peak_idx
+            if is_above:
+                obs_ext_idx = int(np.nanargmax(obs))
+                step = obs_ext_idx - bnd_peak_idx
+            else:
+                obs_ext_idx = int(np.nanargmin(obs))
+                step = obs_ext_idx - bnd_trough_idx
             bnd_shifted = np.roll(bnd_vec, step)
-            margin = obs - bnd_shifted
+            margin = (obs - bnd_shifted) if is_above else (bnd_shifted - obs)
             ax.plot(grid, obs, linewidth=2, label=f"Observed {day}")
             ax.plot(grid, bnd_shifted, linewidth=2, label="Shifted Boundary", color="red")
             ax.fill_between(grid, obs, bnd_shifted, where=(margin > 0), alpha=0.35)
@@ -665,7 +715,7 @@ def generate_case_study(
         # Overlay a single (unshifted) boundary curve for visual reference
         ax.plot(grid, bnd_vec, linewidth=2, color="red", label="Boundary curve (Example)")
         ax.legend()
-        ax.set_title(f"Risk 2: Observed Curves on 2h Exceedance Days ({station} {years_label}-{month:02d})")
+        ax.set_title(f"Risk 2: Observed Curves on {int(risk2_window_hours)}h Exceedance Days ({'above' if is_above else 'below'} boundary) ({station} {years_label}-{month:02d})")
         ax.set_xlabel("Local Hour")
         ax.set_ylabel("Temp (°F)")
         ax.grid(True)
@@ -680,7 +730,7 @@ def generate_case_study(
     if risk2_area_thresh and risk2_area_thresh > 0:
         ax.axvline(risk2_area_thresh, linestyle="--", linewidth=2, label=f"Threshold {risk2_area_thresh:.1f} °F·h")
         ax.legend()
-    ax.set_xlabel("Degree-hours above boundary (°F·h)")
+    ax.set_xlabel("Degree-hours beyond boundary (°F·h)")
     ax.set_ylabel("Days")
     ax.set_title(f"Thermal Loading Severity ({station} {years_label}-{month:02d})")
     plot_severity_hist = path("severity_hist.png")
@@ -722,10 +772,15 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 1 (Peak exceedance)</b>: {k1} of {n_eval} days exceeded the boundary peak. "
-                    f"The estimated probability that a randomly selected day from the selected period ({period_desc}) exceeds the boundary peak is "
-                    f"<b>{p1 * 100:.1f}%</b>. "
-                    f"With 95% confidence, the true probability lies between <b>{ci1_low * 100:.1f}%</b> and <b>{ci1_high * 100:.1f}%</b>."
+                    (f"• <b>Risk 1 (Peak exceedance)</b>: {k1} of {n_eval} days exceeded the boundary peak. "
+                     f"The estimated probability that a randomly selected day from the selected period ({period_desc}) exceeds the boundary peak is "
+                     f"<b>{p1 * 100:.1f}%</b>. "
+                     f"With 95% confidence, the true probability lies between <b>{ci1_low * 100:.1f}%</b> and <b>{ci1_high * 100:.1f}%</b>.")
+                    if is_above else
+                    (f"• <b>Risk 1 (Trough exceedance)</b>: {k1} of {n_eval} days fell below the boundary trough. "
+                     f"The estimated probability that a randomly selected day from the selected period ({period_desc}) falls below the boundary trough is "
+                     f"<b>{p1 * 100:.1f}%</b>. "
+                     f"With 95% confidence, the true probability lies between <b>{ci1_low * 100:.1f}%</b> and <b>{ci1_high * 100:.1f}%</b>.")
                 ),
                 styles["BodyText"],
             )
@@ -733,10 +788,11 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour exceedance after peak alignment. "
-                    f"The estimated probability that a randomly selected day from the selected period ({period_desc}) exceeds the thermal loading criterion is "
-                    f"<b>{p2 * 100:.1f}%</b>. "
-                    f"With 95% confidence, the true probability lies between <b>{ci2_low * 100:.1f}%</b> and <b>{ci2_high * 100:.1f}%</b>."
+                    (f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour period with observed temperature above the boundary (after peak alignment). "
+                     f"Estimated probability: <b>{p2 * 100:.1f}%</b> (95% CI <b>{ci2_low * 100:.1f}%</b>–<b>{ci2_high * 100:.1f}%</b>).")
+                    if is_above else
+                    (f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour period with observed temperature below the boundary (after trough alignment). "
+                     f"Estimated probability: <b>{p2 * 100:.1f}%</b> (95% CI <b>{ci2_low * 100:.1f}%</b>–<b>{ci2_high * 100:.1f}%</b>).")
                 ),
                 styles["BodyText"],
             )
@@ -744,9 +800,11 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours above the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after peak alignment). "
-                    f"The estimated probability over {period_desc} is <b>{p2_area * 100:.1f}%</b>. "
-                    f"With 95% confidence, the true probability lies between <b>{ci2a_low * 100:.1f}%</b> and <b>{ci2a_high * 100:.1f}%</b>."
+                    (f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours above the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after peak alignment). "
+                     f"Estimated probability over {period_desc}: <b>{p2_area * 100:.1f}%</b> (95% CI <b>{ci2a_low * 100:.1f}%</b>–<b>{ci2a_high * 100:.1f}%</b>).")
+                    if is_above else
+                    (f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours below the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after trough alignment). "
+                     f"Estimated probability over {period_desc}: <b>{p2_area * 100:.1f}%</b> (95% CI <b>{ci2a_low * 100:.1f}%</b>–<b>{ci2a_high * 100:.1f}%</b>).")
                 ),
                 styles["BodyText"],
             )
@@ -817,7 +875,7 @@ def generate_case_study(
             # Use the first day's shifted boundary for plotting (they are all aligned)
             shifted_boundary = list(day_groups.values())[0][1]
             risk2_area_examples_file = plot_risk2_area_examples(
-                df_plot, shifted_boundary, station, month, outdir, theta_area=risk2_area_thresh
+                df_plot, shifted_boundary, station, month, outdir, theta_area=risk2_area_thresh, direction=risk_direction
             )
             add_plot_or_text(story, str(risk2_area_examples_file), "Risk 2 (Area Examples)")
 
@@ -836,6 +894,8 @@ def generate_case_study(
             "n_days": n_eval,
             "years": years,
             "month": month,
+            "risk_direction": risk_direction,
+            "r1_threshold_F": r1_threshold,
             "risk1": {
                 "k": k1,
                 "p": p1,
@@ -939,6 +999,12 @@ def main() -> None:
         default=10.0,
         help="Area-based thermal load threshold in degree-hours (°F·h) for Risk 2 (area). Default: 10.0",
     )
+    parser.add_argument(
+        "--risk-direction",
+        choices=["above", "below"],
+        default="above",
+        help="Direction of exceedance: 'above' (hot risk) or 'below' (cold risk). Default: above",
+    )
     # QC CLI options
     parser.add_argument("--qc-min-range-f", type=float, default=2.0,
                         help="Minimum daily diurnal range (°F) required; days with smaller range are dropped (default: 2°F)")
@@ -983,6 +1049,7 @@ def main() -> None:
             tz_name=args.tz,
             risk2_window_hours=args.risk2_hours,
             risk2_area_thresh=args.risk2_area_thresh,
+            risk_direction=args.risk_direction,
             outdir=args.outdir,
             report_title=title,
             qc_min_range_f=args.qc_min_range_f,
@@ -1001,6 +1068,7 @@ def main() -> None:
         print("Severity histogram:", outputs.plot_severity_hist)
         print("Stats:", outputs.stats)
         print("Risk2 area threshold (°F·h):", args.risk2_area_thresh)
+        print("Risk direction:", args.risk_direction)
         # Print QC dropped-days CSV path
         print("QC dropped-days CSV:", os.path.join(args.outdir, f"{outputs.stats['years'][0]}-{outputs.stats['month']:02d}_qc_dropped_days.csv") if 'years' in outputs.stats else '(see output directory)')
 

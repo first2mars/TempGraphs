@@ -1,3 +1,27 @@
+from __future__ import annotations
+
+from reportlab.platypus import Paragraph, Spacer, Image
+from reportlab.lib.styles import getSampleStyleSheet
+
+styles = getSampleStyleSheet()
+
+# Helper: Add plot image to PDF story if available, else fallback text.
+def add_plot_or_text(story, plot_path, description, width=400, height=250):
+    """
+    Add a plot image to the PDF story if available, otherwise add fallback text.
+    
+    Args:
+        story (list): The PDF story flowables list.
+        plot_path (str or None): Path to the plot image, or None if not generated.
+        description (str): Text to display if no plot is available.
+        width (int): Width of the image in the PDF.
+        height (int): Height of the image in the PDF.
+    """
+    if plot_path:
+        story.append(Image(plot_path, width=width, height=height))
+    else:
+        story.append(Paragraph(f"<b>No exceedance events found for {description}.</b>", styles["Normal"]))
+    story.append(Spacer(1, 12))
 """
 stats.py — Temperature vs Boundary Case Study Generator
 
@@ -42,8 +66,6 @@ Dependencies
 ------------
   pandas, numpy, matplotlib, reportlab (for PDF)
 """
-
-from __future__ import annotations
 
 import argparse
 import calendar
@@ -161,12 +183,12 @@ def resample_to_half_hour(df_local: pd.DataFrame) -> Tuple[np.ndarray, Dict[date
     df_30 = df.resample("30min").mean(numeric_only=True)
     # time interpolation, fill both directions to avoid NaNs
     df_30["Air Temp (F)"] = df_30["Air Temp (F)"].interpolate(method="time", limit_direction="both")
-    df_30["date"] = df_30.index.date
     df_30["h_of_day"] = df_30.index.hour + df_30.index.minute / 60.0
 
     grid = np.arange(0, 24, 0.5)
     daily_obs: Dict[datetime.date, np.ndarray] = {}
-    for d, g in df_30.groupby("date"):
+    # Group by the actual calendar day derived from the DateTimeIndex to avoid any dtype surprises
+    for d, g in df_30.groupby(df_30.index.date):
         obs_vec = np.interp(grid, g["h_of_day"].values, g["Air Temp (F)"].values)
         daily_obs[d] = obs_vec
     return grid, daily_obs
@@ -520,16 +542,10 @@ def generate_case_study(
         story.append(Spacer(1, 12))
         
         story.append(Spacer(1, 12))
-        story.append(Image(plot_risk1_examples, width=400, height=250))
-        story.append(Image(plot_risk1_stacked, width=400, height=250))
-        story.append(Spacer(1, 12))
-
-        story.append(Spacer(1, 12))
-        story.append(Image(plot_risk2_examples, width=400, height=250))
-        story.append(Spacer(1, 12))
-        if plot_risk2_stacked:
-            story.append(Image(plot_risk2_stacked, width=400, height=250))
-            story.append(Spacer(1, 12))
+        add_plot_or_text(story, plot_risk1_examples, "Risk 1 (examples)")
+        add_plot_or_text(story, plot_risk1_stacked, "Risk 1 (stacked)")
+        add_plot_or_text(story, plot_risk2_examples, "Risk 2 (examples)")
+        add_plot_or_text(story, plot_risk2_stacked, "Risk 2 (stacked)")
 
         doc.build(story)
 
@@ -562,10 +578,45 @@ def generate_case_study(
     )
 
 
+def parse_months_input(tokens: List[str] | None) -> List[int]:
+    """Parse months like '7', '4-9', or '1,2,12' (wrap-around ranges allowed)."""
+    if not tokens:
+        return []
+    months: set[int] = set()
+    for tok in tokens:
+        if tok is None:
+            continue
+        for part in str(tok).split(','):
+            part = part.strip()
+            if not part:
+                continue
+            if '-' in part:
+                a, b = part.split('-', 1)
+                a = a.strip(); b = b.strip()
+                if a.isdigit() and b.isdigit():
+                    a = int(a); b = int(b)
+                    if 1 <= a <= 12 and 1 <= b <= 12:
+                        if a <= b:
+                            rng = range(a, b+1)
+                        else:
+                            rng = list(range(a, 13)) + list(range(1, b+1))
+                        months.update(rng)
+            else:
+                if part.isdigit():
+                    m = int(part)
+                    if 1 <= m <= 12:
+                        months.add(m)
+    return sorted(months)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate temperature vs boundary case studies.")
     parser.add_argument("--weather", required=True, help="Path to weather CSV")
-    parser.add_argument("--boundary", required=True, help="Path to boundary CSV (hour,temp)")
+    parser.add_argument(
+        "--boundary",
+        required=True,
+        help="Boundary CSV file with columns: hour,temp",
+    )
     parser.add_argument("--station", required=True, help="Station code for labeling (e.g., KEDW)")
     parser.add_argument(
         "--month", type=int, action="append", required=True, help="Month 1-12 (repeatable)"

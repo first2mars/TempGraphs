@@ -191,25 +191,21 @@ outputs/
 - Composite shaded regions updated to **25–75% (IQR)** and **5–95% Range**
 - Robust dtypes, NaN‑safe percentiles, and layered plotting so annotations stay visible
 
-## Below is a description of the `stats.py` file
 
-Here’s a clean, drop-in README.md for stats.py that you can paste into your repo.
+## Temperature vs Boundary Case Study Generator (`stats.py`)
 
-⸻
+Generates monthly “case study” reports comparing observed surface temperatures to a certification boundary profile. Computes risks, writes CSVs/plots, and assembles a polished PDF with clear probability statements.
 
-Temperature vs Boundary Case Study Generator (stats.py)
+### What it does
+- Builds **30‑min** daily temperature profiles in the selected **month** and **years** (local time). (Interpolation is done **within each day only** — no global resampling across years.)
+- **Risk 1 (Peak exceedance):** daily max temp > boundary peak temp.
+- **Risk 2 (Thermal loading — window):** after **peak‑aligning** boundary per day, flags if any continuous **N‑hour** window has observed > boundary (default **2 h**).
+- **Risk 2 (Thermal load — area):** computes total **degree‑hours** above boundary after alignment (∫ max(obs−bnd,0) dt); flags if above a threshold (default **10 °F·h**).
+- Computes **95% Wilson CIs**, includes **severity histogram** (degree‑hours), and produces **example** and **stacked** plots.
+- Optional **data quality (QC)** screen to drop flat‑line or unusable days prior to analysis.
 
-Generates monthly “case study” reports comparing observed surface temperatures to a certification boundary profile. Computes two risks, writes CSVs/plots, and assembles a polished PDF with clear probability statements.
-
-What it does
-	•	Builds 30-min daily temperature profiles in the selected month and years (local time).
-	•	Risk 1 (Peak exceedance): daily max temp > boundary peak temp.
-	•	Risk 2 (Thermal loading): after peak-aligning boundary per day, any continuous N-hour window with observed > boundary.
-	•	Computes 95% Wilson CIs and degree-hours above the boundary.
-	•	Saves CSVs, plots (examples, stacked, severity histogram), and a PDF.
-
-Install
-
+### Install
+```bash
 # Recommended: a fresh venv
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -219,20 +215,20 @@ pip install -r requirements.txt
 pip install reportlab
 # On Windows (or minimal distros) for time zones:
 pip install tzdata
+```
 
-Data format
+### Data format
+**Weather CSV** (columns):
+- `Date` (MM-DD-YYYY)
+- `Time (UTC)` (HH:MM)
+- `Air Temp (F)`
 
-Weather CSV (columns):
-	•	Date (MM-DD-YYYY)
-	•	Time (UTC) (HH:MM)
-	•	Air Temp (F)
+**Boundary CSV** (columns):
+- `hour` (0, 0.5, …, 23.5)
+- `temp` (°F)
 
-Boundary CSV (columns):
-	•	hour (0, 0.5, …, 23.5)
-	•	temp (°F)
-
-Usage
-
+### Usage
+```bash
 python stats.py \
   --weather /path/KEDW_ICAO_20150101_20250101.csv \
   --boundary /path/111FtestCorrected.csv \
@@ -241,94 +237,90 @@ python stats.py \
   --years 2015-2025 \
   --tz America/Los_Angeles \
   --risk2-hours 2 \
+  --risk2-area-thresh 10 \
   --outdir ./outputs
+```
 
-Examples
-
-July 2015–2024 (aggregate the month across years):
-
+#### Examples
+**July 2015–2024 (aggregate the month across years):**
+```bash
 python stats.py --weather ./data/KEDW_ICAO_20150101_20250101.csv \
   --boundary ./data/111FtestCorrected.csv \
   --station KEDW --month 7 --years 2015-2025 \
-  --tz America/Los_Angeles --risk2-hours 2 --outdir ./outputs
+  --tz America/Los_Angeles --risk2-hours 2 --risk2-area-thresh 10 \
+  --outdir ./outputs
+```
 
-Just July 2007:
-
+**Just July 2007:**
+```bash
 python stats.py ... --month 7 --years 2007
+```
 
-Multiple months (each month analyzed separately):
-
+**Multiple months (each month analyzed separately):**
+```bash
 python stats.py ... --month 1 --month 7 --years 2015-2020
+```
 
-Change Risk 2 window to 4 hours:
+**Tighten QC for a sensor with flat‑lines (example):**
+```bash
+python stats.py ... --station KDLF --month 6 --years 2015-2025 \
+  --risk2-hours 2 --risk2-area-thresh 10 \
+  --qc-min-range-f 3 --qc-min-unique 10 --qc-max-flat-frac 0.7 --qc-min-samples 36
+```
 
-python stats.py ... --month 7 --years 2015-2024 --risk2-hours 4
+### Outputs
+Saved to `--outdir` with a stem like `KEDW_2015-2024-07_*`:
+- `*_risk1_daily_peaks.csv`
+- `*_risk2_2h.csv` (or `*_risk2_4h.csv`, etc.) — includes `degree_hours_above_boundary` and `exceed_area_threshold`
+- `*_risk1_examples.png`
+- `*_risk1_stacked.png` (with boundary **peak** reference line)
+- `*_risk2_examples.png` (with per‑day **shifted** boundary in panels)
+- `*_risk2_area_examples.png` (area‑based example & non‑example with positive area shaded)
+- `*_risk2_stacked.png` (observed curves for days that met the **window** criterion + one unshifted boundary curve)
+- `*_severity_hist.png` (dashed vertical line at area threshold, if set)
+- `*_qc_dropped_days.csv` (dates & reasons removed by QC)
+- `*_CaseStudy.pdf` (clear % probabilities + 95% CI, plots, and QC summary)
 
-Outputs
+### CLI options (quick reference)
+| Option | Meaning |
+|---|---|
+| `--weather` | Path to weather CSV |
+| `--boundary` | Path to boundary CSV (`hour,temp`) |
+| `--station` | Label in titles/filenames |
+| `--month` | Month 1–12 (**repeatable**) |
+| `--years` | Year(s) or range (e.g., `2007`, `2015-2025`, `2015,2017,2020`) |
+| `--tz` | IANA zone (e.g., `America/Los_Angeles`) |
+| `--risk2-hours` | Window length for Risk 2 (default **2**) |
+| `--risk2-area-thresh` | Degree‑hours threshold for area‑based Risk 2 (default **10 °F·h**) |
+| `--qc-min-range-f` | Drop days with diurnal range < this (default **2°F**) |
+| `--qc-min-unique` | Drop days with < N unique readings (default **8**) |
+| `--qc-max-flat-frac` | Drop days with flat successive readings > frac (default **0.80**) |
+| `--qc-min-samples` | Drop days with < N raw samples (default **24**) |
+| `--outdir` | Output directory |
+| `--title` | Custom PDF title (optional) |
 
-Saved to --outdir with a stem like KEDW_2015-2024-07_*:
-	•	*_risk1_daily_peaks.csv
-	•	*_risk2_2h.csv (or *_risk2_4h.csv, etc.)
-	•	*_risk1_examples.png
-	•	*_risk1_stacked.png (with boundary peak line)
-	•	*_risk2_examples.png (with per-day shifted boundary in panels)
-	•	*_risk2_stacked.png (with one unshifted boundary curve overlay)
-	•	*_severity_hist.png
-	•	*_CaseStudy.pdf (clear % probabilities + 95% CI)
+### Interpretation
+- **Risk 1:** “Estimated probability is **X%**. With 95% confidence, true probability lies between **Y%–Z%**.”
+- **Risk 2 (window):** same structure; N‑hour window after **peak alignment**.
+- **Risk 2 (area):** probability that total positive degree‑hours exceed the chosen threshold (default **10 °F·h**).
 
-CLI options (short)
+> **Peak alignment:** For Risk 2, the daily boundary curve is **circularly shifted** so its peak aligns with the observed peak for that day, then the window/area exceedances are tested.
 
-Option	Meaning
---weather	Path to weather CSV
---boundary	Path to boundary CSV
---station	Label in titles/filenames
---month	Month 1–12 (repeatable)
---years	Year(s) or range (e.g., 2007, 2015-2025, 2015,2017,2020)
---tz	IANA zone (e.g., America/Los_Angeles)
---risk2-hours	Window length for Risk 2
---outdir	Output directory
---title	Custom PDF title (optional)
+### Notes & assumptions
+- Time zone conversion uses `zoneinfo` (install `tzdata` if needed).
+- Matplotlib runs headless (`Agg` backend).
+- PDF generation requires `reportlab`.
+- Wilson CI uses the actual number of days **evaluated** (`n_eval`), which may differ from the calendar day count after QC.
 
-Interpretation
-	•	Risk 1: “Estimated probability is X%. With 95% confidence, true probability lies between Y%–Z%.”
-	•	Risk 2: Same structure; N-hour window after peak-aligning boundary.
-
-Peak alignment: For Risk 2, the daily boundary curve is circularly shifted so its peak aligns with the observed peak for that day, then the window exceedance is tested.
-
-Notes & assumptions
-	•	Time zone conversion uses zoneinfo (install tzdata if needed).
-	•	Matplotlib runs headless (Agg backend).
-	•	Report generation requires reportlab.
-
-Troubleshooting
-	•	Month filter sanity check: the script prints one debug line:
-
-[DEBUG] Filtered records: <rows> | Days: <unique days> | Years: [...] | Month: <m>
-
-If days ≈ 31 × number of years (e.g., ~310 for July 2015–2024), you’re good.
-
-	•	Mismatch warning:
-
-[WARN] Unique dates from resample/group (X) != calendar day count (Y).
-
-Usually harmless (missing/extra partial days). The analysis proceeds using the grouped days.
-
-	•	PDF not created: install reportlab:
-
-pip install reportlab
-
-
-	•	Time zone issues on Windows: install tzdata:
-
-pip install tzdata
-
-
-
-Repro tips
-	•	Pin versions via requirements.txt (provided).
-	•	Keep boundary grid at 0.5-hour increments for clean interpolation.
-	•	For winter analysis, just change --month and keep the same workflow.
-
-⸻
-
-If you want, I can also add a tiny Makefile or bash script to batch run all months and a specific year range into a single outputs/ tree.
+### Troubleshooting
+- **Month filter sanity check:** you should see:
+  ```
+  [DEBUG] Filtered records: <rows> | Days: <unique days> | Years: [...] | Month: <m>
+  ```
+- **Resample mismatch warning:**
+  ```
+  [WARN] Unique dates from resample/group (X) != calendar day count after QC (Y). Using n_eval=X.
+  ```
+  This is informational; the script uses `n_eval` for all probabilities.
+- **PDF image missing:** plots are only added if generated. If none, the PDF shows a clear “No exceedance events found …” message.
+- **QC removed everything:** relax thresholds via `--qc-*` or inspect `*_qc_dropped_days.csv`.

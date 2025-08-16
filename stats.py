@@ -34,7 +34,7 @@ def plot_risk2_area_examples(df, shifted_boundary, station, month, outdir, theta
     # Compute area exceedance for each day
     for date, group in df.groupby(df.index.date):
         observed = group["temp"].values
-        area = np.trapz(np.clip(observed - shifted_boundary, 0, None), local_hours)
+        area = np.trapezoid(np.clip(observed - shifted_boundary, 0, None), local_hours)
         if area > theta_area and len(exceed_days) < 1:
             exceed_days.append((date, observed, area))
         elif area <= theta_area and len(non_exceed_days) < 1:
@@ -171,6 +171,12 @@ def wilson_ci(k: int, n: int, z: float = 1.96) -> Tuple[Tuple[float, float], flo
     """Wilson score interval (95% by default) and point estimate."""
     if n == 0:
         return (float("nan"), float("nan")), float("nan")
+    if k < 0:
+        k = 0
+    if k > n:
+        # clamp and warn in console; prevents sqrt domain errors if upstream mismatch occurs
+        print(f"[WARN] clamping k ({k}) to n ({n}) in wilson_ci")
+        k = n
     phat = k / n
     den = 1 + z ** 2 / n
     center = (phat + z ** 2 / (2 * n)) / den
@@ -233,22 +239,109 @@ def parse_utc_local(date_str: str, time_str: str, tz_name: str) -> datetime:
         return dt_utc  # graceful fallback
 
 
+
+# ---- Data Quality Control (QC) helpers ----
+def qc_bad_day(reason_map: Dict[datetime.date, str], d: datetime.date, reason: str):
+    # keep first reason only to avoid overwriting
+    if d not in reason_map:
+        reason_map[d] = reason
+
+def qc_filter_days(df_local: pd.DataFrame,
+                   min_range_f: float,
+                   min_unique: int,
+                   max_flat_frac: float,
+                   min_samples: int) -> Tuple[pd.DataFrame, List[datetime.date], Dict[datetime.date, str]]:
+    """Return a filtered dataframe (still in local time) with bad days removed.
+    Criteria:
+      - day has < min_samples raw points
+      - diurnal range (max-min) < min_range_f
+      - number of unique temps < min_unique
+      - fraction of identical successive readings > max_flat_frac (flat-lined sensor)
+    """
+    # Expect columns: [datetime_local, Air Temp (F)]
+    if df_local.empty:
+        return df_local, [], {}
+
+    # Work on a copy grouped by date
+    reasons: Dict[datetime.date, str] = {}
+    keep_days: List[datetime.date] = []
+
+    gby = df_local.groupby(df_local["datetime_local"].dt.date)
+    for d, g in gby:
+        temps = g["Air Temp (F)"].astype(float).to_numpy()
+        n = temps.size
+        if n < min_samples:
+            qc_bad_day(reasons, d, f"too_few_samples:{n}")
+            continue
+        tmax = float(np.nanmax(temps))
+        tmin = float(np.nanmin(temps))
+        dr = tmax - tmin
+        if not np.isfinite(dr) or dr < min_range_f:
+            qc_bad_day(reasons, d, f"low_range:{dr:.2f}")
+            continue
+        nunique = int(len(np.unique(temps)))
+        if nunique < min_unique:
+            qc_bad_day(reasons, d, f"low_unique:{nunique}")
+            continue
+        # flat-line fraction: proportion of successive pairs with exactly no change
+        if n > 1:
+            diffs = np.diff(temps)
+            flat_frac = float(np.mean(np.isclose(diffs, 0.0)))
+        else:
+            flat_frac = 1.0
+        if flat_frac > max_flat_frac:
+            qc_bad_day(reasons, d, f"flat_frac:{flat_frac:.2f}")
+            continue
+        keep_days.append(d)
+
+    if not keep_days:
+        return df_local.iloc[0:0].copy(), [], reasons
+
+    mask_keep = df_local["datetime_local"].dt.date.isin(keep_days)
+    return df_local.loc[mask_keep].copy(), keep_days, reasons
+
+
 def resample_to_half_hour(df_local: pd.DataFrame) -> Tuple[np.ndarray, Dict[datetime.date, np.ndarray]]:
-    """Resample to a 30‑minute grid and return per‑day vectors on 0.5 h grid."""
-    df = df_local.sort_values("datetime_local").set_index("datetime_local")
-    df_30 = df.resample("30min").mean(numeric_only=True)
-    # time interpolation, fill both directions to avoid NaNs
-    df_30["Air Temp (F)"] = df_30["Air Temp (F)"].interpolate(method="time", limit_direction="both")
-    df_30["h_of_day"] = df_30.index.hour + df_30.index.minute / 60.0
+    """Build 30-minute daily vectors by interpolating within each day only.
+    This avoids global resampling across multi-year gaps, which can fabricate thousands of days.
+    """
+    df = df_local.sort_values("datetime_local").copy()
 
     grid = np.arange(0, 24, 0.5)
     daily_obs: Dict[datetime.date, np.ndarray] = {}
-    # Group by the actual calendar day derived from the DateTimeIndex to avoid any dtype surprises
-    for d, g in df_30.groupby(df_30.index.date):
-        obs_vec = np.interp(grid, g["h_of_day"].values, g["Air Temp (F)"].values)
-        daily_obs[d] = obs_vec
-    return grid, daily_obs
 
+    # Group by calendar date and interpolate within the day
+    for d, g in df.groupby(df["datetime_local"].dt.date):
+        gg = g.sort_values("datetime_local")
+        h = gg["datetime_local"].dt.hour.to_numpy() + gg["datetime_local"].dt.minute.to_numpy() / 60.0
+        y = gg["Air Temp (F)"].astype(float).to_numpy()
+
+        # Deduplicate minute-times to ensure monotonic x for interpolation
+        if h.size > 1:
+            gtmp = pd.DataFrame({"h": h, "y": y})
+            gtmp["h_round"] = np.round(gtmp["h"] * 60).astype(int)  # minutes since midnight
+            gagg = gtmp.groupby("h_round", as_index=False)["y"].mean()
+            xs = (gagg["h_round"].to_numpy() / 60.0).astype(float)
+            ys = gagg["y"].to_numpy()
+        else:
+            xs = h
+            ys = y
+
+        # Ensure increasing x and drop bad points
+        order = np.argsort(xs)
+        xs = xs[order]
+        ys = ys[order]
+        mask = np.isfinite(xs) & np.isfinite(ys) & (xs >= 0) & (xs < 24)
+        xs = xs[mask]
+        ys = ys[mask]
+        if xs.size == 0:
+            continue
+
+        # Interpolate within-day; outside the in-day hull, hold edge values
+        obs_vec = np.interp(grid, xs, ys, left=ys[0], right=ys[-1])
+        daily_obs[d] = obs_vec
+
+    return grid, daily_obs
 
 def generate_case_study(
     *,
@@ -262,6 +355,10 @@ def generate_case_study(
     risk2_area_thresh: float = 10.0,
     outdir: str | None = None,
     report_title: str | None = None,
+    qc_min_range_f: float = 2.0,
+    qc_min_unique: int = 8,
+    qc_max_flat_frac: float = 0.80,
+    qc_min_samples: int = 24,
 ) -> CaseStudyOutputs:
     """
     Compute risks over the selected years and month, write CSVs/plots, and build a polished PDF report.
@@ -326,11 +423,24 @@ def generate_case_study(
 
     print(f"[DEBUG] Filtered records: {len(df_mon):,} | Days: {df_mon['datetime_local'].dt.date.nunique():,} | Years: {sorted(set(df_mon['datetime_local'].dt.year))} | Month: {month}")
 
+    # --- Data Quality: remove flat-line / low-variance / sparse days
+    df_mon, kept_days, qc_reasons = qc_filter_days(
+        df_mon,
+        min_range_f=qc_min_range_f,
+        min_unique=qc_min_unique,
+        max_flat_frac=qc_max_flat_frac,
+        min_samples=qc_min_samples,
+    )
+    n_days_qc = int(len(kept_days))
+    if n_days_qc == 0:
+        raise ValueError("All days failed QC; relax QC thresholds or check data quality.")
+
     # Use only the month-filtered dataset for counts/labels
     present_years = sorted(df_mon["datetime_local"].dt.year.unique().tolist())
     n_days_mon = int(df_mon["datetime_local"].dt.date.nunique())
     # Build 30‑min daily vectors for this month only
     grid, daily_obs = resample_to_half_hour(df_mon)
+    # n_days_qc is the actual number of days after QC
 
     # Boundary on same grid
     bnd_vec = np.interp(grid, df_bnd["hour"].values, df_bnd["temp"].values)
@@ -338,8 +448,9 @@ def generate_case_study(
     bnd_peak_temp = float(np.nanmax(bnd_vec))
 
     dates = sorted(daily_obs.keys())
-    if len(dates) != n_days_mon:
-        print(f"[WARN] Unique dates from resample/group ({len(dates)}) != calendar day count ({n_days_mon}). Proceeding with grouped days.")
+    n_eval = len(dates)
+    if n_eval != n_days_qc:
+        print(f"[WARN] Unique dates from resample/group ({n_eval}) != calendar day count after QC ({n_days_qc}). Using n_eval={n_eval} as denominator for risk stats.")
 
     # ---- Risk 1: daily peak vs boundary peak (no shift)
     k1 = 0
@@ -347,7 +458,7 @@ def generate_case_study(
         obs_peak = float(np.nanmax(daily_obs[d]))
         if obs_peak > bnd_peak_temp:
             k1 += 1
-    (ci1_low, ci1_high), p1 = wilson_ci(k1, n_days_mon)
+    (ci1_low, ci1_high), p1 = wilson_ci(k1, n_eval)
 
     # ---- Risk 2: any contiguous N‑hour window above boundary after peak‑alignment
     win_steps = int(round(risk2_window_hours / 0.5))
@@ -397,12 +508,12 @@ def generate_case_study(
         if float(np.nanmax(obs_vec)) > bnd_peak_temp:
             r1_exceed_dates.append(d)
 
-    (ci2_low, ci2_high), p2 = wilson_ci(k2, n_days_mon)
+    (ci2_low, ci2_high), p2 = wilson_ci(k2, n_eval)
 
     # Area-based Risk 2: thermal load exceedance using degree-hours threshold
     degree_hours_arr = np.array(degree_hours, dtype=float)
     k2_area = int(np.sum(degree_hours_arr > risk2_area_thresh))
-    (ci2a_low, ci2a_high), p2_area = wilson_ci(k2_area, n_days_mon)
+    (ci2a_low, ci2a_high), p2_area = wilson_ci(k2_area, n_eval)
 
     # ---- File name helpers
     # Year label based on data actually present after filtering
@@ -467,6 +578,16 @@ def generate_case_study(
     df_r2 = pd.DataFrame(r2_rows)
     csv_risk2 = path(f"risk2_{int(risk2_window_hours)}h.csv")
     df_r2.to_csv(csv_risk2, index=False)
+
+    # ---- QC dropped-days CSV export
+    qc_csv = path("qc_dropped_days.csv")
+    if qc_reasons:
+        pd.DataFrame([
+            {"date": d, "reason": qc_reasons[d]} for d in sorted(qc_reasons)
+        ]).to_csv(qc_csv, index=False)
+    else:
+        # create an empty file with header to be explicit
+        pd.DataFrame(columns=["date", "reason"]).to_csv(qc_csv, index=False)
 
     # ---- Plots
     # Risk 1 examples
@@ -581,10 +702,19 @@ def generate_case_study(
         story.append(Paragraph("<b>Results & Probability Statements</b>", styles["Heading2"]))
         month_name = calendar.month_name[month]
         period_desc = f"{month_name} {years_label}"
+        # --- QC summary in PDF ---
+        dropped = len(qc_reasons)
+        if dropped:
+            story.append(Paragraph(
+                f"Data quality screen removed <b>{dropped}</b> day(s) for issues like low diurnal range, too few samples, or flat-line readings. "
+                f"Probability estimates below use the remaining <b>{n_days_qc}</b> day(s). See qc_dropped_days.csv for details.",
+                styles["BodyText"],
+            ))
+            story.append(Spacer(1, 12))
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 1 (Peak exceedance)</b>: {k1} of {n_days_mon} days exceeded the boundary peak. "
+                    f"• <b>Risk 1 (Peak exceedance)</b>: {k1} of {n_eval} days exceeded the boundary peak. "
                     f"The estimated probability that a randomly selected day from the selected period ({period_desc}) exceeds the boundary peak is "
                     f"<b>{p1 * 100:.1f}%</b>. "
                     f"With 95% confidence, the true probability lies between <b>{ci1_low * 100:.1f}%</b> and <b>{ci1_high * 100:.1f}%</b>."
@@ -595,7 +725,7 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_days_mon} days contained a continuous {risk2_window_hours:.0f}-hour exceedance after peak alignment. "
+                    f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour exceedance after peak alignment. "
                     f"The estimated probability that a randomly selected day from the selected period ({period_desc}) exceeds the thermal loading criterion is "
                     f"<b>{p2 * 100:.1f}%</b>. "
                     f"With 95% confidence, the true probability lies between <b>{ci2_low * 100:.1f}%</b> and <b>{ci2_high * 100:.1f}%</b>."
@@ -606,7 +736,7 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_days_mon} days had total positive degree-hours above the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after peak alignment). "
+                    f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours above the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after peak alignment). "
                     f"The estimated probability over {period_desc} is <b>{p2_area * 100:.1f}%</b>. "
                     f"With 95% confidence, the true probability lies between <b>{ci2a_low * 100:.1f}%</b> and <b>{ci2a_high * 100:.1f}%</b>."
                 ),
@@ -695,7 +825,7 @@ def generate_case_study(
         plot_risk2_stacked=plot_risk2_stacked,
         plot_severity_hist=plot_severity_hist,
         stats={
-            "n_days": n_days_mon,
+            "n_days": n_eval,
             "years": years,
             "month": month,
             "risk1": {
@@ -801,6 +931,15 @@ def main() -> None:
         default=10.0,
         help="Area-based thermal load threshold in degree-hours (°F·h) for Risk 2 (area). Default: 10.0",
     )
+    # QC CLI options
+    parser.add_argument("--qc-min-range-f", type=float, default=2.0,
+                        help="Minimum daily diurnal range (°F) required; days with smaller range are dropped (default: 2°F)")
+    parser.add_argument("--qc-min-unique", type=int, default=8,
+                        help="Minimum unique temperature readings per day; days with fewer are dropped (default: 8)")
+    parser.add_argument("--qc-max-flat-frac", type=float, default=0.80,
+                        help="Max fraction of identical successive readings allowed in a day; above this the day is dropped (default: 0.80)")
+    parser.add_argument("--qc-min-samples", type=int, default=24,
+                        help="Minimum number of samples in a day before resampling; days with fewer are dropped (default: 24)")
     parser.add_argument(
         "--outdir", default="./outputs", help="Output directory"
     )
@@ -838,6 +977,10 @@ def main() -> None:
             risk2_area_thresh=args.risk2_area_thresh,
             outdir=args.outdir,
             report_title=title,
+            qc_min_range_f=args.qc_min_range_f,
+            qc_min_unique=args.qc_min_unique,
+            qc_max_flat_frac=args.qc_max_flat_frac,
+            qc_min_samples=args.qc_min_samples,
         )
         print("\n=== Generated Case Study ===")
         print("PDF:", outputs.pdf)
@@ -850,6 +993,8 @@ def main() -> None:
         print("Severity histogram:", outputs.plot_severity_hist)
         print("Stats:", outputs.stats)
         print("Risk2 area threshold (°F·h):", args.risk2_area_thresh)
+        # Print QC dropped-days CSV path
+        print("QC dropped-days CSV:", os.path.join(args.outdir, f"{outputs.stats['years'][0]}-{outputs.stats['month']:02d}_qc_dropped_days.csv") if 'years' in outputs.stats else '(see output directory)')
 
 
 if __name__ == "__main__":

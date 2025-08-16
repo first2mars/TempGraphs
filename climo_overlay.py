@@ -1,5 +1,6 @@
 import argparse
 import calendar
+from typing import Optional
 import os
 import re
 import pandas as pd
@@ -7,12 +8,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from functools import reduce
 from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 def build_monthly_climatology(
     raw_csv: str,
     month: int = 8,
     years: int = 10,
     tz_name: str = "America/Chicago",
+    start_year: int | None = None,
+    end_year: int | None = None,
 ) -> pd.DataFrame:
     """
     Build hourly climatology (local time) for a given month from climate.af.mil CSV.
@@ -39,12 +43,30 @@ def build_monthly_climatology(
     if df.empty:
         raise ValueError(f"No rows found for month={month} in the provided file.")
 
-    # Filter to most recent years
-    latest_year = df["DATETIME"].dt.year.max()
-    start_year = latest_year - years + 1
-    df = df[df["DATETIME"].dt.year >= start_year].copy()
+    # Select year window: explicit start/end if provided, else last N years ending at data max
+    year_series = df["DATETIME"].dt.year
+    data_min_year = int(year_series.min())
+    data_max_year = int(year_series.max())
+
+    if start_year is not None or end_year is not None:
+        sy = int(start_year) if start_year is not None else max(data_min_year, data_max_year - years + 1)
+        ey = int(end_year) if end_year is not None else data_max_year
+        if sy > ey:
+            raise ValueError(f"Invalid year range: start_year ({sy}) > end_year ({ey}).")
+    else:
+        ey = data_max_year
+        sy = ey - years + 1
+
+    # clamp to available data
+    sy = max(sy, data_min_year)
+    ey = min(ey, data_max_year)
+
+    df = df[(year_series >= sy) & (year_series <= ey)].copy()
     if df.empty:
-        raise ValueError(f"No rows found for the last {years} years starting from {start_year}.")
+        raise ValueError(f"No rows found within year range {sy}-{ey}.")
+
+    latest_year = ey
+    start_year = sy
 
     # Convert to tz-aware datetime in UTC
     df["DATETIME"] = df["DATETIME"].dt.tz_localize("UTC")
@@ -189,8 +211,8 @@ def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: 
 
 def infer_identifier_from_path(path: str) -> str:
     basename = os.path.basename(path)
-    ident = basename.split("_")[0]
-    return ident
+    m = re.match(r"^([A-Za-z]{4})", basename)
+    return m.group(1).upper() if m else basename[:4].upper()
 
 
 
@@ -203,8 +225,8 @@ def plot_composite_mean_std(
     test: pd.DataFrame | None = None,
 ):
     """
-    Plot a single mean line per station. If average_only is False, also plot that station's ±1 SD band.
-    Expects columns like: hour_local, KDLF_mean, KDLF_std, KEND_mean, KEND_std, ...
+    Plot a single mean line per station. If average_only is False, also shade 25–75% (IQR) and 5–95% ranges.
+    Expects columns like: hour_local, KDLF_mean, KDLF_p25, KDLF_p75, KDLF_p05, KDLF_p95, ...
     """
     plt.figure(figsize=(14, 7))
 
@@ -325,12 +347,130 @@ def find_latest_station_csv(data_dir: str, ident: str) -> str | None:
     candidates.sort()
     return os.path.join(data_dir, candidates[-1])
 
+def compute_per_year_hourly_means(
+    raw_csv: str,
+    month: int,
+    tz_name: str,
+    years: int,
+    start_year: Optional[int] = None,
+    end_year: Optional[int] = None,
+) -> tuple[pd.DataFrame, int, int]:
+    """
+    Return a DataFrame [year, hour, mean_temp] for the chosen month, and the
+    (start_year, end_year) actually used after clamping to data.
+    """
+    df = pd.read_csv(raw_csv)
+    need = {"Date", "Time (UTC)", "Air Temp (F)"}
+    if not need.issubset(df.columns):
+        raise ValueError("Input CSV must contain 'Date', 'Time (UTC)', 'Air Temp (F)'.")
+
+    from datetime import timezone
+    try:
+        from zoneinfo import ZoneInfo  # py3.9+
+    except Exception:
+        ZoneInfo = None
+
+    def _to_local(row):
+        dt_utc = datetime.strptime(f"{row['Date']} {row['Time (UTC)']}", "%m-%d-%Y %H:%M").replace(tzinfo=timezone.utc)
+        if ZoneInfo is None:
+            return dt_utc
+        try:
+            return dt_utc.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            return dt_utc
+
+    df["dt_local"] = df.apply(_to_local, axis=1)
+    df = df[df["dt_local"].dt.month == int(month)].copy()
+    if df.empty:
+        raise ValueError(f"No data for month {month} after timezone conversion.")
+
+    ys = df["dt_local"].dt.year
+    data_min, data_max = int(ys.min()), int(ys.max())
+
+    if start_year is None and end_year is None:
+        ey = data_max
+        sy = ey - int(years) + 1
+    else:
+        sy = int(start_year) if start_year is not None else max(data_min, data_max - int(years) + 1)
+        ey = int(end_year) if end_year is not None else data_max
+
+    sy = max(sy, data_min)
+    ey = min(ey, data_max)
+
+    df = df[(ys >= sy) & (ys <= ey)].copy()
+    if df.empty:
+        raise ValueError(f"No rows within requested year window {sy}-{ey}.")
+
+    df["hour_local"] = df["dt_local"].dt.hour.astype(int)
+    df["year"] = df["dt_local"].dt.year.astype(int)
+
+    g = (
+        df.groupby(["year", "hour_local"], as_index=False)["Air Temp (F)"]
+        .mean()
+        .rename(columns={"hour_local": "hour", "Air Temp (F)": "mean_temp"})
+    )
+
+    # ensure 0..23 per year, interpolate if an hour is missing
+    filled = []
+    for yr, sub in g.groupby("year"):
+        sub = sub.set_index("hour").reindex(range(24))
+        sub.index.name = "hour"
+        sub["year"] = int(yr)
+        sub["mean_temp"] = sub["mean_temp"].interpolate(limit_direction="both")
+        filled.append(sub.reset_index())
+
+    out = pd.concat(filled, ignore_index=True)
+    return out[["year", "hour", "mean_temp"]], sy, ey
+
+
+def plot_per_year_means(
+    df_year_hour: pd.DataFrame,
+    ident: str,
+    month: int,
+    sy: int,
+    ey: int,
+    test_csv: Optional[str],
+    outdir: str,
+):
+    """Plot one mean line per year; optional chamber overlay."""
+    os.makedirs(outdir, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for yr, sub in df_year_hour.groupby("year"):
+        sub = sub.sort_values("hour")
+        ax.plot(sub["hour"].values, sub["mean_temp"].values, linewidth=1.8, label=str(int(yr)), zorder=2)
+
+    if test_csv:
+        try:
+            test = pd.read_csv(test_csv)
+            h = test.iloc[:, 0].astype(float).values
+            t = test.iloc[:, 1].astype(float).values
+            ax.plot(h, t, linewidth=2.5, linestyle="--", label="Chamber Profile", zorder=3)
+        except Exception as e:
+            print(f"[WARN] Could not overlay test profile: {e}")
+
+    ax.set_xlim(0, 23)
+    ax.set_xlabel("Hour (local)")
+    ax.set_ylabel("Temperature (°F)")
+    ax.set_title(f"{ident} — {calendar.month_name[int(month)]} Per-Year Hourly Means • {sy}–{ey}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=3)
+
+    fname = f"{ident}_{calendar.month_abbr[int(month)].lower()}_peryear_means_{sy}_{ey}.png"
+    out_path = os.path.join(outdir, fname)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    return out_path
+
 def main():
     ap = argparse.ArgumentParser(description="Build hourly temperature climatologies and overlay chamber test profiles.")
     ap.add_argument("--raw", help="Path to a station CSV (used to infer defaults and TZ)")
     ap.add_argument("--test", help="Path to chamber test CSV (hour,temp). Required unless --composite.")
     ap.add_argument("--outdir", default="./outputs", help="Output directory root (default: ./outputs)")
     ap.add_argument("--years", type=int, default=10, help="Most recent years to average (default: 10)")
+    ap.add_argument("--start_year", type=int, help="Start year (inclusive) for the climatology window. Overrides --years when set.")
+    ap.add_argument("--end_year", type=int, help="End year (inclusive) for the climatology window. Overrides --years when set.")
     ap.add_argument("--month", type=int, default=8,
                     help="Month number to build climatology for (1=Jan .. 12=Dec). Default: 8 (August)")
     ap.add_argument("--tz", default="America/Chicago", help="IANA timezone for local hour (default: America/Chicago)")
@@ -342,7 +482,11 @@ def main():
     ap.add_argument("--average_only", action="store_true", help="Draw mean lines only (hide ±1 SD bands)")
     ap.add_argument("--stations", help="Comma-separated station identifiers (e.g., KDLF,KEND)")
     ap.add_argument("--station", help="Single-station mode: comma-separated 4-letter IDs (e.g., KDLF or KDLF,KEND). Requires --data_dir if --raw is not provided. If both --raw and --station are provided, --raw takes priority.")
-
+    ap.add_argument(
+    "--per_year",
+    action="store_true",
+    help="Single-station: plot a separate mean line for each year in the selected window (no shaded bands)."
+    )
     args = ap.parse_args()
 
     if args.composite:
@@ -374,7 +518,14 @@ def main():
 
             raw_path = os.path.join(args.data_dir, raw_name)
             try:
-                cl = build_monthly_climatology(raw_path, month=args.month, years=args.years, tz_name=args.tz)
+                cl = build_monthly_climatology(
+                    raw_path,
+                    month=args.month,
+                    years=args.years,
+                    tz_name=args.tz,
+                    start_year=args.start_year,
+                    end_year=args.end_year,
+                )
             except Exception as e:
                 print(f"[WARN] Skipping {raw_path}: {e}")
                 continue
@@ -451,7 +602,14 @@ def main():
 
         # Process each selected station file
         for raw_path in raw_paths:
-            climo = build_monthly_climatology(raw_path, month=args.month, years=args.years, tz_name=args.tz)
+            climo = build_monthly_climatology(
+                raw_path,
+                month=args.month,
+                years=args.years,
+                tz_name=args.tz,
+                start_year=args.start_year,
+                end_year=args.end_year,
+            )
 
             ident = infer_identifier_from_path(raw_path)
             mon_abbr = calendar.month_abbr[int(args.month)].lower()
@@ -462,24 +620,42 @@ def main():
             climo_csv = os.path.join(station_outdir, "climo.csv")
             climo.to_csv(climo_csv, index=False)
 
+            # Optional per-year plot (independent of overlay)
+            if args.per_year:
+                df_yh, sy_used, ey_used = compute_per_year_hourly_means(
+                    raw_path,
+                    month=args.month,
+                    tz_name=args.tz,
+                    years=args.years,
+                    start_year=args.start_year,
+                    end_year=args.end_year,
+                )
+                per_year_png = plot_per_year_means(
+                    df_yh,
+                    ident=ident,
+                    month=args.month,
+                    sy=sy_used,
+                    ey=ey_used,
+                    test_csv=args.test if args.test else None,
+                    outdir=station_outdir,
+                )
+                print(f"Saved per-year means plot: {per_year_png}")
+
+            # Overlay + residuals only if a test profile is provided
             if args.test:
                 test = pd.read_csv(
                     args.test,
                     dtype={"hour": "float64", "temp": "float64"},
                     low_memory=False,
                 )
-                # Normalize headers just in case
                 test.columns = [c.strip().lower() for c in test.columns]
-                # Ensure required columns are present and numeric
                 if not {"hour", "temp"}.issubset(set(test.columns)):
                     raise ValueError("Test CSV must have columns: hour,temp")
                 test = test.dropna(subset=["hour", "temp"]).sort_values("hour").reset_index(drop=True)
 
-                # Ensure climo numeric for interpolation
                 for col in ["hour_local", "mean", "std", "min", "max", "p05", "p25", "p75", "p95"]:
                     climo[col] = pd.to_numeric(climo[col], errors="coerce")
 
-                # Interpolate climo to test hours
                 climo_interp = pd.DataFrame()
                 climo_interp["hour"] = test["hour"]
                 climo_interp["mean"] = np.interp(test["hour"], climo["hour_local"], climo["mean"])
@@ -494,6 +670,7 @@ def main():
                 title_prefix = f"{ident} — {calendar.month_name[int(args.month)]} Climatology • {climo.attrs.get('start_year','?')}-{climo.attrs.get('latest_year','?')}"
                 overlay_png_name = f"{ident}_{mon_abbr}_overlay.png"
                 residuals_png_name = f"{ident}_{mon_abbr}_residuals.png"
+
                 overlay_and_metrics(
                     test, climo_interp, station_outdir,
                     title_prefix=title_prefix,

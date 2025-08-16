@@ -1,5 +1,7 @@
 # SimpleWeather — Hourly Climatology + Chamber Overlay
 
+## Below Description is of climo_overlay.py
+
 A utility to build **monthly hourly temperature climatologies** from **climate.af.mil** station CSVs (converted to **local time**), and to **overlay a climate‑chamber test profile**. Also supports **composite plots** across many stations.
 
 ---
@@ -188,3 +190,145 @@ outputs/
 - Test overlay available in **single** (`--test`) and **composite** (`--composite_test`) modes
 - Composite shaded regions updated to **25–75% (IQR)** and **5–95% Range**
 - Robust dtypes, NaN‑safe percentiles, and layered plotting so annotations stay visible
+
+## Below is a description of the `stats.py` file
+
+Here’s a clean, drop-in README.md for stats.py that you can paste into your repo.
+
+⸻
+
+Temperature vs Boundary Case Study Generator (stats.py)
+
+Generates monthly “case study” reports comparing observed surface temperatures to a certification boundary profile. Computes two risks, writes CSVs/plots, and assembles a polished PDF with clear probability statements.
+
+What it does
+	•	Builds 30-min daily temperature profiles in the selected month and years (local time).
+	•	Risk 1 (Peak exceedance): daily max temp > boundary peak temp.
+	•	Risk 2 (Thermal loading): after peak-aligning boundary per day, any continuous N-hour window with observed > boundary.
+	•	Computes 95% Wilson CIs and degree-hours above the boundary.
+	•	Saves CSVs, plots (examples, stacked, severity histogram), and a PDF.
+
+Install
+
+# Recommended: a fresh venv
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
+# If PDF build fails, add:
+pip install reportlab
+# On Windows (or minimal distros) for time zones:
+pip install tzdata
+
+Data format
+
+Weather CSV (columns):
+	•	Date (MM-DD-YYYY)
+	•	Time (UTC) (HH:MM)
+	•	Air Temp (F)
+
+Boundary CSV (columns):
+	•	hour (0, 0.5, …, 23.5)
+	•	temp (°F)
+
+Usage
+
+python stats.py \
+  --weather /path/KEDW_ICAO_20150101_20250101.csv \
+  --boundary /path/111FtestCorrected.csv \
+  --station KEDW \
+  --month 7 \
+  --years 2015-2025 \
+  --tz America/Los_Angeles \
+  --risk2-hours 2 \
+  --outdir ./outputs
+
+Examples
+
+July 2015–2024 (aggregate the month across years):
+
+python stats.py --weather ./data/KEDW_ICAO_20150101_20250101.csv \
+  --boundary ./data/111FtestCorrected.csv \
+  --station KEDW --month 7 --years 2015-2025 \
+  --tz America/Los_Angeles --risk2-hours 2 --outdir ./outputs
+
+Just July 2007:
+
+python stats.py ... --month 7 --years 2007
+
+Multiple months (each month analyzed separately):
+
+python stats.py ... --month 1 --month 7 --years 2015-2020
+
+Change Risk 2 window to 4 hours:
+
+python stats.py ... --month 7 --years 2015-2024 --risk2-hours 4
+
+Outputs
+
+Saved to --outdir with a stem like KEDW_2015-2024-07_*:
+	•	*_risk1_daily_peaks.csv
+	•	*_risk2_2h.csv (or *_risk2_4h.csv, etc.)
+	•	*_risk1_examples.png
+	•	*_risk1_stacked.png (with boundary peak line)
+	•	*_risk2_examples.png (with per-day shifted boundary in panels)
+	•	*_risk2_stacked.png (with one unshifted boundary curve overlay)
+	•	*_severity_hist.png
+	•	*_CaseStudy.pdf (clear % probabilities + 95% CI)
+
+CLI options (short)
+
+Option	Meaning
+--weather	Path to weather CSV
+--boundary	Path to boundary CSV
+--station	Label in titles/filenames
+--month	Month 1–12 (repeatable)
+--years	Year(s) or range (e.g., 2007, 2015-2025, 2015,2017,2020)
+--tz	IANA zone (e.g., America/Los_Angeles)
+--risk2-hours	Window length for Risk 2
+--outdir	Output directory
+--title	Custom PDF title (optional)
+
+Interpretation
+	•	Risk 1: “Estimated probability is X%. With 95% confidence, true probability lies between Y%–Z%.”
+	•	Risk 2: Same structure; N-hour window after peak-aligning boundary.
+
+Peak alignment: For Risk 2, the daily boundary curve is circularly shifted so its peak aligns with the observed peak for that day, then the window exceedance is tested.
+
+Notes & assumptions
+	•	Time zone conversion uses zoneinfo (install tzdata if needed).
+	•	Matplotlib runs headless (Agg backend).
+	•	Report generation requires reportlab.
+
+Troubleshooting
+	•	Month filter sanity check: the script prints one debug line:
+
+[DEBUG] Filtered records: <rows> | Days: <unique days> | Years: [...] | Month: <m>
+
+If days ≈ 31 × number of years (e.g., ~310 for July 2015–2024), you’re good.
+
+	•	Mismatch warning:
+
+[WARN] Unique dates from resample/group (X) != calendar day count (Y).
+
+Usually harmless (missing/extra partial days). The analysis proceeds using the grouped days.
+
+	•	PDF not created: install reportlab:
+
+pip install reportlab
+
+
+	•	Time zone issues on Windows: install tzdata:
+
+pip install tzdata
+
+
+
+Repro tips
+	•	Pin versions via requirements.txt (provided).
+	•	Keep boundary grid at 0.5-hour increments for clean interpolation.
+	•	For winter analysis, just change --month and keep the same workflow.
+
+⸻
+
+If you want, I can also add a tiny Makefile or bash script to batch run all months and a specific year range into a single outputs/ tree.

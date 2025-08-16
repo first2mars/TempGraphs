@@ -2,10 +2,11 @@
 
 Utilities for building hourly temperature climatologies from `climate.af.mil` station data, overlaying climate‑chamber test profiles, and evaluating exceedance risk.
 
-The repository exposes two primary scripts:
+The repository offers command-line scripts and a simple GUI:
 
 - `climo_overlay.py` – create monthly hourly temperature climatologies and optionally overlay a chamber‑test profile. Supports single‑station and composite plots.
 - `stats.py` – quantify exceedance risk relative to a boundary profile and generate plots and PDF summaries.
+- `gui_app.py` – Tkinter interface for running case studies via the `stats.py` options.
 
 ## Installation
 
@@ -18,6 +19,8 @@ pip install -r requirements.txt
 # optional extras
 pip install reportlab tzdata
 ```
+
+If you intend to launch the GUI, ensure the standard-library **tkinter** module is available (e.g., install `python3-tk` on Linux).
 
 Key packages (also listed in `requirements.txt`):
 
@@ -146,19 +149,22 @@ python stats.py \
   --month 7 \
   --years 2015-2025 \
   --tz America/Los_Angeles \
+  --risk-direction above \
   --risk2-hours 2 \
   --risk2-area-thresh 10 \
   --outdir ./outputs
 ```
+
+Use `--risk-direction below` for cold risk (temps falling below the boundary).
 
 ### Outputs
 
 Saved to `--outdir` with a stem like `KEDW_2015-2024-07_*`:
 
 - `*_risk1_daily_peaks.csv`
-- `*_risk2_2h.csv` (or `*_risk2_4h.csv`, etc.) — includes `degree_hours_above_boundary` and `exceed_area_threshold`
+- `*_risk2_2h.csv` (or `*_risk2_4h.csv`, etc.) — includes `degree_hours_beyond_boundary` and `exceed_area_threshold`
 - `*_risk1_examples.png`
-- `*_risk1_stacked.png` (with boundary **peak** reference line)
+- `*_risk1_stacked.png` (with boundary **peak**/**trough** reference line)
 - `*_risk2_examples.png` (with per‑day **shifted** boundary in panels)
 - `*_risk2_area_examples.png` (area‑based example & non‑example with positive area shaded)
 - `*_risk2_stacked.png` (observed curves for days meeting the **window** criterion + one unshifted boundary curve)
@@ -176,6 +182,7 @@ Saved to `--outdir` with a stem like `KEDW_2015-2024-07_*`:
 | `--month` | Month 1–12 (repeatable) |
 | `--years` | Year(s) or range (`2007`, `2015-2025`, `2015,2017,2020`) |
 | `--tz` | IANA zone (e.g., `America/Los_Angeles`) |
+| `--risk-direction` | `above` for hot risk (temps exceeding boundary) or `below` for cold risk (temps falling below); default `above` |
 | `--risk2-hours` | Window length for Risk 2 (default **2**) |
 | `--risk2-area-thresh` | Degree‑hours threshold for area‑based Risk 2 (default **10 °F·h**) |
 | `--qc-min-range-f` | Drop days with diurnal range < this (default **2 °F**) |
@@ -212,3 +219,20 @@ Saved to `--outdir` with a stem like `KEDW_2015-2024-07_*`:
 - **PDF image missing:** plots are added only if generated; otherwise the PDF shows “No exceedance events found …”.
 - **QC removed everything:** relax thresholds via `--qc-*` or inspect `*_qc_dropped_days.csv`.
 
+## `gui_app.py`
+
+A lightweight Tkinter GUI for the case study generator in `stats.py`.
+
+Launch it with:
+
+```bash
+python gui_app.py
+```
+
+The **Stats** tab mirrors the CLI options:
+
+- Pick weather and boundary files.
+- Enter station, select months and years, choose a timezone and risk direction.
+- Adjust QC thresholds, risk parameters, and output directory.
+
+Click **Run** to generate the analysis; a log area reports success or errors and lists the paths produced by `generate_case_study`.

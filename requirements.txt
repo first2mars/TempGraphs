@@ -5,3 +5,7 @@ tzdata>=2023.3
 backports.zoneinfo; python_version < "3.9"
 # PDF generation library required for report creation
 reportlab>=3.6.12
+
+# GUI support requires Tk, which is part of the standard library.
+# Ensure the Python environment includes tkinter (install `python3-tk` on
+# Linux systems) when running the GUI.

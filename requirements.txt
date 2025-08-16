@@ -3,3 +3,5 @@ numpy>=1.25.0
 matplotlib>=3.7.0
 tzdata>=2023.3
 backports.zoneinfo; python_version < "3.9"
+# PDF generation library required for report creation
+reportlab>=3.6.12

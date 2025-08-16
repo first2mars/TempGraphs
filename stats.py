@@ -84,6 +84,7 @@ class CaseStudyOutputs:
     plot_risk1_examples: str | None
     plot_risk1_stacked: str
     plot_risk2_examples: str | None
+    plot_risk2_stacked: str | None
     plot_severity_hist: str
     stats: Dict
 
@@ -116,25 +117,29 @@ def parse_years_input(year_tokens: List[str] | None) -> List[int]:
             sub = sub.strip()
             if not sub:
                 continue
-            if '-' in sub:
-                # Inclusive range
+            # Extract all integers from this substring using regex. This makes
+            # parsing more robust, ignoring any trailing characters such as
+            # backslashes or whitespace that may accidentally be included.
+            import re  # Local import to avoid global dependency at module level
+            numbers = re.findall(r"\d+", sub)
+            if not numbers:
+                continue
+            if len(numbers) >= 2:
+                # Treat the first two numbers as a range (inclusive). If the
+                # second number is smaller than the first, swap them.
                 try:
-                    start_str, end_str = sub.split('-', 1)
-                    start, end = int(start_str), int(end_str)
-                    if start > end:
-                        start, end = end, start
-                    years.extend(range(start, end + 1))
-                except ValueError:
-                    # Fall back to treating as single year if parsing fails
-                    try:
-                        years.append(int(sub))
-                    except Exception:
-                        raise ValueError(f"Invalid year/range specification: {sub}")
-            else:
-                try:
-                    years.append(int(sub))
+                    start, end = int(numbers[0]), int(numbers[1])
                 except Exception:
-                    raise ValueError(f"Invalid year specification: {sub}")
+                    continue
+                if start > end:
+                    start, end = end, start
+                years.extend(range(start, end + 1))
+            elif len(numbers) == 1:
+                # Single year
+                try:
+                    years.append(int(numbers[0]))
+                except Exception:
+                    continue
     return sorted(set(years))
 
 
@@ -153,7 +158,7 @@ def parse_utc_local(date_str: str, time_str: str, tz_name: str) -> datetime:
 def resample_to_half_hour(df_local: pd.DataFrame) -> Tuple[np.ndarray, Dict[datetime.date, np.ndarray]]:
     """Resample to a 30‑minute grid and return per‑day vectors on 0.5 h grid."""
     df = df_local.sort_values("datetime_local").set_index("datetime_local")
-    df_30 = df.resample("30T").mean(numeric_only=True)
+    df_30 = df.resample("30min").mean(numeric_only=True)
     # time interpolation, fill both directions to avoid NaNs
     df_30["Air Temp (F)"] = df_30["Air Temp (F)"].interpolate(method="time", limit_direction="both")
     df_30["date"] = df_30.index.date
@@ -220,15 +225,32 @@ def generate_case_study(
     df_wx["datetime_local"] = df_wx.apply(
         lambda r: parse_utc_local(r["Date"], r["Time (UTC)"], tz_name), axis=1
     )
-    mask = df_wx["datetime_local"].dt.year.isin(years) & (df_wx["datetime_local"].dt.month == month)
+    # Build masks explicitly to avoid any operator‑precedence surprises
+    year_mask = df_wx["datetime_local"].dt.year.isin(years)
+    month_mask = df_wx["datetime_local"].dt.month == month
+    mask = year_mask & month_mask
     df_mon = df_wx.loc[mask, ["datetime_local", "Air Temp (F)"]].copy()
+
+    # Sanity check: ensure we only captured the requested month
+    months_present = sorted(df_mon["datetime_local"].dt.month.unique().tolist())
+    if len(months_present) != 1 or months_present[0] != month:
+        raise ValueError(
+            "Month filter failed: requested month={} but found months={}. "
+            "Please report this with your command line so we can reproduce.".format(month, months_present)
+        )
+
     if df_mon.empty:
         raise ValueError(
             "No data found for the specified month/year(s) after timezone conversion. "
             f"month={month}, years={years}, tz={tz_name}"
         )
 
-    # Build 30‑min daily vectors
+    print(f"[DEBUG] Filtered records: {len(df_mon):,} | Days: {df_mon['datetime_local'].dt.date.nunique():,} | Years: {sorted(set(df_mon['datetime_local'].dt.year))} | Month: {month}")
+
+    # Use only the month-filtered dataset for counts/labels
+    present_years = sorted(df_mon["datetime_local"].dt.year.unique().tolist())
+    n_days_mon = int(df_mon["datetime_local"].dt.date.nunique())
+    # Build 30‑min daily vectors for this month only
     grid, daily_obs = resample_to_half_hour(df_mon)
 
     # Boundary on same grid
@@ -237,7 +259,8 @@ def generate_case_study(
     bnd_peak_temp = float(np.nanmax(bnd_vec))
 
     dates = sorted(daily_obs.keys())
-    n_days = len(dates)
+    if len(dates) != n_days_mon:
+        print(f"[WARN] Unique dates from resample/group ({len(dates)}) != calendar day count ({n_days_mon}). Proceeding with grouped days.")
 
     # ---- Risk 1: daily peak vs boundary peak (no shift)
     k1 = 0
@@ -245,7 +268,7 @@ def generate_case_study(
         obs_peak = float(np.nanmax(daily_obs[d]))
         if obs_peak > bnd_peak_temp:
             k1 += 1
-    (ci1_low, ci1_high), p1 = wilson_ci(k1, n_days)
+    (ci1_low, ci1_high), p1 = wilson_ci(k1, n_days_mon)
 
     # ---- Risk 2: any contiguous N‑hour window above boundary after peak‑alignment
     win_steps = int(round(risk2_window_hours / 0.5))
@@ -260,6 +283,7 @@ def generate_case_study(
 
     # For stacked plot
     r1_exceed_dates: List[datetime.date] = []
+    r2_exceed_dates: List[datetime.date] = []
 
     for d in dates:
         obs_vec = daily_obs[d]
@@ -289,26 +313,23 @@ def generate_case_study(
         if nx_day_r2 is None and not exceed_win:
             nx_day_r2 = d
 
+        if exceed_win:
+            r2_exceed_dates.append(d)
         if float(np.nanmax(obs_vec)) > bnd_peak_temp:
             r1_exceed_dates.append(d)
 
-    (ci2_low, ci2_high), p2 = wilson_ci(k2, n_days)
+    (ci2_low, ci2_high), p2 = wilson_ci(k2, n_days_mon)
 
     # ---- File name helpers
-    # Determine a label for years in output names
-    sorted_years = sorted(years)
+    # Year label based on data actually present after filtering
+    sorted_years = present_years
     if len(sorted_years) == 1:
         years_label = str(sorted_years[0])
     else:
-        contiguous = all(
-            sorted_years[i] + 1 == sorted_years[i + 1] for i in range(len(sorted_years) - 1)
-        )
-        if contiguous:
-            years_label = f"{sorted_years[0]}-{sorted_years[-1]}"
-        else:
-            years_label = "_".join(str(y) for y in sorted_years)
+        contiguous = all(sorted_years[i] + 1 == sorted_years[i + 1] for i in range(len(sorted_years) - 1))
+        years_label = f"{sorted_years[0]}-{sorted_years[-1]}" if contiguous else "_".join(str(y) for y in sorted_years)
 
-    stem = f"{station}_{years_label}{month:02d}"
+    stem = f"{station}_{years_label}-{month:02d}"
 
     def path(name: str) -> str:
         return os.path.join(outdir, f"{stem}_{name}")
@@ -420,6 +441,24 @@ def generate_case_study(
         plt.savefig(plot_risk2_examples)
         plt.close()
 
+    # Risk 2 stacked (all 2h exceedance days)
+    plot_risk2_stacked: str | None = None
+    if len(r2_exceed_dates) > 0:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for d in r2_exceed_dates:
+            ax.plot(grid, daily_obs[d], alpha=0.5)
+        # Overlay a single (unshifted) boundary curve for visual reference
+        ax.plot(grid, bnd_vec, linewidth=2, color="red", label="Boundary curve (Example)")
+        ax.legend()
+        ax.set_title(f"Risk 2: Observed Curves on 2h Exceedance Days ({station} {years_label}-{month:02d})")
+        ax.set_xlabel("Local Hour")
+        ax.set_ylabel("Temp (°F)")
+        ax.grid(True)
+        plot_risk2_stacked = path("risk2_stacked.png")
+        plt.tight_layout()
+        plt.savefig(plot_risk2_stacked)
+        plt.close()
+
     # Severity histogram
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.hist(degree_hours, bins=12, edgecolor="black")
@@ -457,7 +496,7 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 1 (Peak exceedance)</b>: {k1} of {n_days} days exceeded the boundary peak. "
+                    f"• <b>Risk 1 (Peak exceedance)</b>: {k1} of {n_days_mon} days exceeded the boundary peak. "
                     f"The estimated probability that a randomly selected day from the selected period ({period_desc}) exceeds the boundary peak is "
                     f"<b>{p1 * 100:.1f}%</b>. "
                     f"With 95% confidence, the true probability lies between <b>{ci1_low * 100:.1f}%</b> and <b>{ci1_high * 100:.1f}%</b>."
@@ -468,7 +507,7 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_days} days contained a continuous {risk2_window_hours:.0f}-hour exceedance after peak alignment. "
+                    f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_days_mon} days contained a continuous {risk2_window_hours:.0f}-hour exceedance after peak alignment. "
                     f"The estimated probability that a randomly selected day from the selected period ({period_desc}) exceeds the thermal loading criterion is "
                     f"<b>{p2 * 100:.1f}%</b>. "
                     f"With 95% confidence, the true probability lies between <b>{ci2_low * 100:.1f}%</b> and <b>{ci2_high * 100:.1f}%</b>."
@@ -479,6 +518,18 @@ def generate_case_study(
         story.append(Spacer(1, 12))
         story.append(Image(plot_severity_hist, width=400, height=250))
         story.append(Spacer(1, 12))
+        
+        story.append(Spacer(1, 12))
+        story.append(Image(plot_risk1_examples, width=400, height=250))
+        story.append(Image(plot_risk1_stacked, width=400, height=250))
+        story.append(Spacer(1, 12))
+
+        story.append(Spacer(1, 12))
+        story.append(Image(plot_risk2_examples, width=400, height=250))
+        story.append(Spacer(1, 12))
+        if plot_risk2_stacked:
+            story.append(Image(plot_risk2_stacked, width=400, height=250))
+            story.append(Spacer(1, 12))
 
         doc.build(story)
 
@@ -489,9 +540,10 @@ def generate_case_study(
         plot_risk1_examples=plot_risk1_examples,
         plot_risk1_stacked=plot_risk1_stacked,
         plot_risk2_examples=plot_risk2_examples,
+        plot_risk2_stacked=plot_risk2_stacked,
         plot_severity_hist=plot_severity_hist,
         stats={
-            "n_days": n_days,
+            "n_days": n_days_mon,
             "years": years,
             "month": month,
             "risk1": {
@@ -594,6 +646,7 @@ def main() -> None:
         print("Risk1 examples:", outputs.plot_risk1_examples)
         print("Risk1 stacked:", outputs.plot_risk1_stacked)
         print("Risk2 examples:", outputs.plot_risk2_examples)
+        print("Risk2 stacked:", outputs.plot_risk2_stacked)
         print("Severity histogram:", outputs.plot_severity_hist)
         print("Stats:", outputs.stats)
 

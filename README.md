@@ -6,7 +6,7 @@ The repository offers command-line scripts and a simple GUI:
 
 - `climo_overlay.py` – create monthly hourly temperature climatologies and optionally overlay a chamber‑test profile. Supports single‑station and composite plots.
 - `stats.py` – quantify exceedance risk relative to a boundary profile and generate plots and PDF summaries.
-- `gui_app.py` – Tkinter interface for running case studies via the `stats.py` options.
+- `gui_app.py` – Tkinter interface for running case studies and climatology overlays.
 
 ## Installation
 
@@ -217,7 +217,7 @@ Saved to `--outdir` with a stem like `KEDW_2015-2024-07_*`:
 
 ## `gui_app.py`
 
-A lightweight Tkinter GUI for the case study generator in `stats.py`.
+A lightweight Tkinter GUI with two tabs.
 
 Launch it with:
 
@@ -232,3 +232,11 @@ The **Stats** tab mirrors the CLI options:
 - Adjust QC thresholds, risk parameters, and output directory.
 
 Click **Run** to generate the analysis; a log area reports success or errors and lists the paths produced by `generate_case_study`.
+
+The **Climo Overlay** tab builds a monthly climatology from a station CSV and overlays a chamber test profile:
+
+- Choose the raw station file and test CSV.
+- Specify output directory, target month, number of years to average, optional start/end years and timezone.
+- Enable **Average Only** to skip residual plots.
+
+Run the tab to save `climo.csv` plus overlay/residual plots in the selected output folder.

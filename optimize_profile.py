@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -118,28 +118,57 @@ def transform_profile(seed_csv: str, a: float, b: float, out_csv: str) -> None:
     out.to_csv(out_csv, index=False)
 
 
-def objective_for_base(stats: Dict, target: Target, w_peak: float, w_win: float, w_area: float) -> float:
-    """Primary match on area; hinge penalties if peak/window outside EDW CI."""
+def objective_for_base(
+    stats: Dict, target: Target, w_peak: float, w_win: float, w_area: float, *, direction: str
+) -> float:
+    """Objective per base.
+
+    For BELOW (cold) scenarios we treat the target CIs as *upper bounds* (don’t exceed).
+    We do *not* reward being far below the target; a separate global beta-regularizer
+    will push the profile up subject to these hinges. For ABOVE, keep the symmetric
+    least-squares match to target probabilities.
+    """
     J = 0.0
-    # Area distance
+
+    # --- Risk 2 (area)
     p_area = float(stats["risk2_area"]["p"]) if stats.get("risk2_area") else float("nan")
-    J += w_area * (p_area - target.metric_area_p) ** 2
-    # Peak within target CI?
+    lo_a, hi_a = target.metric_area_ci
+    if direction == "below":
+        # Hinge only if we exceed the upper CI; otherwise no penalty (feasible region)
+        if p_area > hi_a:
+            J += w_area * (p_area - hi_a) ** 2
+    else:
+        # ABOVE: symmetric match to target p
+        J += w_area * (p_area - target.metric_area_p) ** 2
+
+    # --- Risk 1 (peak/trough)
     if w_peak > 0 and stats.get("risk1"):
         p_peak = float(stats["risk1"]["p"])
-        lo, hi = target.metric_peak_ci
-        if p_peak < lo:
-            J += w_peak * (lo - p_peak) ** 2
-        elif p_peak > hi:
-            J += w_peak * (p_peak - hi) ** 2
-    # Window within target CI?
+        lo_p, hi_p = target.metric_peak_ci
+        if direction == "below":
+            # Hinge only if exceeding the upper CI
+            if p_peak > hi_p:
+                J += w_peak * (p_peak - hi_p) ** 2
+        else:
+            # ABOVE: symmetric match
+            if p_peak < lo_p:
+                J += w_peak * (lo_p - p_peak) ** 2
+            elif p_peak > hi_p:
+                J += w_peak * (p_peak - hi_p) ** 2
+
+    # --- Risk 2 (window)
     if w_win > 0 and stats.get("risk2"):
         p_win = float(stats["risk2"]["p"])
-        lo, hi = target.metric_win_ci
-        if p_win < lo:
-            J += w_win * (lo - p_win) ** 2
-        elif p_win > hi:
-            J += w_win * (p_win - hi) ** 2
+        lo_w, hi_w = target.metric_win_ci
+        if direction == "below":
+            if p_win > hi_w:
+                J += w_win * (p_win - hi_w) ** 2
+        else:
+            if p_win < lo_w:
+                J += w_win * (lo_w - p_win) ** 2
+            elif p_win > hi_w:
+                J += w_win * (p_win - hi_w) ** 2
+
     return float(J)
 
 
@@ -159,6 +188,9 @@ def run_grid(
     risk2_hours: float,
     area_thresh: float,
     outdir: str,
+    risk2_peak_window: Optional[Tuple[int, int]] = None,
+    risk2_window_in_peak_only: bool = False,
+    risk2_min_peak_delta: float = 0.0,
 ) -> Tuple[pd.DataFrame, Tuple[float, float]]:
     os.makedirs(outdir, exist_ok=True)
 
@@ -188,12 +220,21 @@ def run_grid(
                         risk2_window_hours=risk2_hours,
                         risk2_area_thresh=area_thresh,
                         risk_direction=risk_direction,
+                        risk2_peak_window=risk2_peak_window,
+                        risk2_window_in_peak_only=risk2_window_in_peak_only,
+                        risk2_min_peak_delta=risk2_min_peak_delta,
                         outdir=os.path.join(outdir, f"{base.station}"),
                         report_title=None,
                     )
-                    total_J += objective_for_base(outputs.stats, target, w_peak, w_win, w_area)
+                    total_J += objective_for_base(
+                        outputs.stats, target, w_peak, w_win, w_area, direction=risk_direction
+                    )
 
                 rows.append({"alpha": a, "beta": b, "objective": total_J})
+                # For BELOW scenarios, prefer warmer (higher beta) profiles as long as constraints are met.
+                # Use a very small regularizer so it only breaks ties within the feasible region.
+                if risk_direction == "below":
+                    total_J += 1e-3 * (-b)
                 if total_J < best_score:
                     best_score = total_J
                     best_ab = (a, b)
@@ -227,6 +268,12 @@ def main():
     ap.add_argument("--w-window", type=float, default=0.0, help="weight for window CI hinge penalty")
     ap.add_argument("--w-area", type=float, default=1.0, help="weight for area risk match")
     ap.add_argument("--outdir", default="./outputs/optimize")
+    ap.add_argument("--risk2-peak-window", nargs=2, type=int, metavar=("START_HR","END_HR"),
+                help="Local-hour window [START END] for focusing Risk 2 metrics (wrap-around allowed, e.g., 21 3)")
+    ap.add_argument("--risk2-window-in-peak-only", action="store_true",
+                help="Apply the continuous window test only within the peak window")
+    ap.add_argument("--risk2-min-peak-delta", type=float, default=0.0,
+                help="Minimum required peak exceedance (°F) at aligned daily extreme for Risk 2 counting")
     args = ap.parse_args()
 
     # years -> list[int]
@@ -297,6 +344,9 @@ def main():
         risk2_hours=args.risk2_hours,
         area_thresh=args.risk2_area_thresh,
         outdir=args.outdir,
+        risk2_peak_window=tuple(args.risk2_peak_window) if args.risk2_peak_window else None,
+        risk2_window_in_peak_only=args.risk2_window_in_peak_only,
+        risk2_min_peak_delta=args.risk2_min_peak_delta,
     )
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -324,6 +374,9 @@ def main():
         "best": {"alpha": best_a, "beta": best_b},
         "leaderboard_csv": leaderboard_csv,
         "reduced_profile_csv": reduced_csv,
+        "peak_window": list(args.risk2_peak_window) if args.risk2_peak_window else None,
+        "window_in_peak_only": bool(args.risk2_window_in_peak_only),
+        "min_peak_delta_F": float(args.risk2_min_peak_delta),
     }
     with open(os.path.join(args.outdir, f"opt_manifest_m{args.month}.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)

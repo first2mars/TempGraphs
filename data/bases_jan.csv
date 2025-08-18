@@ -1,0 +1,2 @@
+station,weather,tz,years
+KEND,./data/KEND_ICAO_20150101_20250101.csv,America/Chicago,2015-2024

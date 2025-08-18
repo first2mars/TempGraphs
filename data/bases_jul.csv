@@ -1,0 +1,5 @@
+station,weather,tz,years
+KDLF,./data/KDLF_ICAO_20150101_20250101.csv,America/Chicago,2015-2024
+KRND,./data/KRND_ICAO_20150101_20250101.csv,America/Chicago,2015-2024
+KEND,./data/KEND_ICAO_20150101_20250101.csv,America/Chicago,2015-2024
+KCBM,./data/KCBM_ICAO_20150101_20250101.csv,America/Chicago,2015-2024

@@ -161,6 +161,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 import json
+import logging
 
 import matplotlib
 
@@ -292,23 +293,30 @@ def qc_filter_days(df_local: pd.DataFrame,
     gby = df_local.groupby(df_local["datetime_local"].dt.date)
     for d, g in gby:
         temps = g["Air Temp (F)"].astype(float).to_numpy()
-        n = temps.size
-        if n < min_samples:
-            qc_bad_day(reasons, d, f"too_few_samples:{n}")
+        n_raw = temps.size
+        if n_raw < min_samples:
+            qc_bad_day(reasons, d, f"too_few_samples:{n_raw}")
             continue
-        tmax = float(np.nanmax(temps))
-        tmin = float(np.nanmin(temps))
+        # operate on finite readings only
+        finite_mask = np.isfinite(temps)
+        temps_fin = temps[finite_mask]
+        n_fin = temps_fin.size
+        if n_fin == 0:
+            qc_bad_day(reasons, d, "all_nan")
+            continue
+        tmax = float(np.max(temps_fin))
+        tmin = float(np.min(temps_fin))
         dr = tmax - tmin
         if not np.isfinite(dr) or dr < min_range_f:
             qc_bad_day(reasons, d, f"low_range:{dr:.2f}")
             continue
-        nunique = int(len(np.unique(temps)))
+        nunique = int(len(np.unique(temps_fin)))
         if nunique < min_unique:
             qc_bad_day(reasons, d, f"low_unique:{nunique}")
             continue
-        # flat-line fraction: proportion of successive pairs with exactly no change
-        if n > 1:
-            diffs = np.diff(temps)
+        # flat-line fraction on the finite subset only
+        if n_fin > 1:
+            diffs = np.diff(temps_fin)
             flat_frac = float(np.mean(np.isclose(diffs, 0.0)))
         else:
             flat_frac = 1.0
@@ -376,6 +384,9 @@ def generate_case_study(
     tz_name: str = "America/Los_Angeles",
     risk2_window_hours: float = 2.0,
     risk2_area_thresh: float = 10.0,
+    risk2_peak_window: tuple[int, int] | None = None,
+    risk2_window_in_peak_only: bool = False,
+    risk2_min_peak_delta: float = 0.0,
     risk_direction: str = "above",
     outdir: str | None = None,
     report_title: str | None = None,
@@ -464,6 +475,19 @@ def generate_case_study(
     n_days_mon = int(df_mon["datetime_local"].dt.date.nunique())
     # Build 30‑min daily vectors for this month only
     grid, daily_obs = resample_to_half_hour(df_mon)
+
+    # Peak window mask over local hours (applied to margin for Risk 2)
+    def _make_peak_mask(win: tuple[int, int] | None) -> np.ndarray:
+        if not win:
+            return np.ones_like(grid, dtype=bool)
+        s, e = int(win[0]) % 24, int(win[1]) % 24
+        if s == e:
+            return np.ones_like(grid, dtype=bool)
+        if s < e:
+            return (grid >= s) & (grid < e)
+        return (grid >= s) | (grid < e)
+
+    peak_mask = _make_peak_mask(risk2_peak_window)
     # n_days_qc is the actual number of days after QC
 
     # Boundary on same grid
@@ -538,12 +562,26 @@ def generate_case_study(
         # Margin is positive when the day violates the boundary criterion
         margin = (obs_vec - bnd_shifted) if is_above else (bnd_shifted - obs_vec)
 
-        # degree‑hours above/below boundary
-        degree_hours.append(float(np.sum(np.clip(margin, 0, None)) * 0.5))
+        # Peak margin at aligned extreme (sanity gate)
+        if is_above:
+            peak_margin = float(obs_vec[obs_ext_idx] - bnd_shifted[obs_ext_idx])
+        else:
+            peak_margin = float(bnd_shifted[obs_ext_idx] - obs_vec[obs_ext_idx])
 
-        # contiguous window check
+        gated = margin.copy()
+        if risk2_min_peak_delta > 0 and not (peak_margin >= risk2_min_peak_delta):
+            gated[:] = 0.0
+
+        # Area is always masked to peak window if provided
+        area_margin = gated.copy()
+        if risk2_peak_window is not None:
+            area_margin[~peak_mask] = 0.0
+        degree_hours.append(float(np.sum(np.clip(area_margin, 0, None)) * 0.5))
+
+        # Window test optionally restricted to peak window
+        win_margin = gated if not risk2_window_in_peak_only else (gated * peak_mask)
         exceed_win = any(
-            np.all(margin[i:i + win_steps] > 0) for i in range(0, len(margin) - win_steps + 1)
+            np.all(win_margin[i:i + win_steps] > 0) for i in range(0, len(win_margin) - win_steps + 1)
         )
         if exceed_win:
             k2 += 1
@@ -617,15 +655,29 @@ def generate_case_study(
             step = obs_ext_idx - bnd_trough_idx
         bnd_shifted = np.roll(bnd_vec, step)
         margin = (obs_vec - bnd_shifted) if is_above else (bnd_shifted - obs_vec)
-        degree_hrs = float(np.sum(np.clip(margin, 0, None)) * 0.5)
+        if is_above:
+            peak_margin = float(obs_vec[obs_ext_idx] - bnd_shifted[obs_ext_idx])
+        else:
+            peak_margin = float(bnd_shifted[obs_ext_idx] - obs_vec[obs_ext_idx])
+
+        gated = margin.copy()
+        if risk2_min_peak_delta > 0 and not (peak_margin >= risk2_min_peak_delta):
+            gated[:] = 0.0
+
+        area_margin = gated.copy()
+        if risk2_peak_window is not None:
+            area_margin[~peak_mask] = 0.0
+        win_margin = gated if not risk2_window_in_peak_only else (gated * peak_mask)
+
+        degree_hrs = float(np.sum(np.clip(area_margin, 0, None)) * 0.5)
         exceed_win = any(
-            np.all(margin[i:i + win_steps] > 0) for i in range(0, len(margin) - win_steps + 1)
+            np.all(win_margin[i:i + win_steps] > 0) for i in range(0, len(win_margin) - win_steps + 1)
         )
         best_mean = -float('inf')
         best_start = float('nan')
         if exceed_win:
-            for i in range(0, len(margin) - win_steps + 1):
-                w = margin[i:i + win_steps]
+            for i in range(0, len(win_margin) - win_steps + 1):
+                w = win_margin[i:i + win_steps]
                 if np.all(w > 0):
                     m = float(np.mean(w))
                     if m > best_mean:
@@ -706,6 +758,15 @@ def generate_case_study(
             ax.plot(grid, obs, linewidth=2, label=f"Observed {day}")
             ax.plot(grid, bnd_shifted, linewidth=2, label="Shifted Boundary", color="red")
             ax.fill_between(grid, obs, bnd_shifted, where=(margin > 0), alpha=0.35)
+            # Shade peak window if provided
+            if risk2_peak_window is not None:
+                s, e = risk2_peak_window
+                if s != e:
+                    if s < e:
+                        ax.axvspan(s, e, alpha=0.08)
+                    else:
+                        ax.axvspan(s, 24, alpha=0.08)
+                        ax.axvspan(0, e, alpha=0.08)
             ax.set_title(title)
             ax.set_xlabel("Local Hour")
             ax.set_ylabel("Temp (°F)")
@@ -720,6 +781,15 @@ def generate_case_study(
     plot_risk2_stacked: str | None = None
     if len(r2_exceed_dates) > 0:
         fig, ax = plt.subplots(figsize=(10, 6))
+        # Shade peak window if provided
+        if risk2_peak_window is not None:
+            s, e = risk2_peak_window
+            if s != e:
+                if s < e:
+                    ax.axvspan(s, e, alpha=0.08)
+                else:
+                    ax.axvspan(s, 24, alpha=0.08)
+                    ax.axvspan(0, e, alpha=0.08)
         for d in r2_exceed_dates:
             ax.plot(grid, daily_obs[d], alpha=0.5)
         # Overlay a single (unshifted) boundary curve for visual reference
@@ -815,12 +885,18 @@ def generate_case_study(
             "k": int(k2),
             "p": float(p2),
             "ci": _ci_list((ci2_low, ci2_high)),
+            "peak_window": list(risk2_peak_window) if risk2_peak_window else None,
+            "window_in_peak_only": risk2_window_in_peak_only,
+            "min_peak_delta_F": risk2_min_peak_delta,
         },
         "risk2_area": {
             "threshold_Fh": float(risk2_area_thresh),
             "k": int(k2_area),
             "p": float(p2_area),
             "ci": _ci_list((ci2a_low, ci2a_high)),
+            "peak_window": list(risk2_peak_window) if risk2_peak_window else None,
+            "window_in_peak_only": risk2_window_in_peak_only,
+            "min_peak_delta_F": risk2_min_peak_delta,
         },
         "files": {
             "pdf": path("CaseStudy.pdf"),
@@ -882,11 +958,13 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    (f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour period with observed temperature above the boundary (after peak alignment). "
-                     f"Estimated probability: <b>{p2 * 100:.1f}%</b> (95% CI <b>{ci2_low * 100:.1f}%</b>–<b>{ci2_high * 100:.1f}%</b>).")
+                    (f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour period with observed temperature above the boundary (after peak alignment)"
+                     + (f" within the local-hour peak window <b>{risk2_peak_window[0]:02d}–{risk2_peak_window[1]:02d}</b>" if risk2_window_in_peak_only and risk2_peak_window else "")
+                     + f". Estimated probability: <b>{p2 * 100:.1f}%</b> (95% CI <b>{ci2_low * 100:.1f}%</b>–<b>{ci2_high * 100:.1f}%</b>).")
                     if is_above else
-                    (f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour period with observed temperature below the boundary (after trough alignment). "
-                     f"Estimated probability: <b>{p2 * 100:.1f}%</b> (95% CI <b>{ci2_low * 100:.1f}%</b>–<b>{ci2_high * 100:.1f}%</b>).")
+                    (f"• <b>Risk 2 (Thermal loading, {risk2_window_hours:.0f} h)</b>: {k2} of {n_eval} days contained a continuous {risk2_window_hours:.0f}-hour period with observed temperature below the boundary (after trough alignment)"
+                     + (f" within the local-hour peak window <b>{risk2_peak_window[0]:02d}–{risk2_peak_window[1]:02d}</b>" if risk2_window_in_peak_only and risk2_peak_window else "")
+                     + f". Estimated probability: <b>{p2 * 100:.1f}%</b> (95% CI <b>{ci2_low * 100:.1f}%</b>–<b>{ci2_high * 100:.1f}%</b>).")
                 ),
                 styles["BodyText"],
             )
@@ -894,11 +972,13 @@ def generate_case_study(
         story.append(
             Paragraph(
                 (
-                    (f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours above the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after peak alignment). "
-                     f"Estimated probability over {period_desc}: <b>{p2_area * 100:.1f}%</b> (95% CI <b>{ci2a_low * 100:.1f}%</b>–<b>{ci2a_high * 100:.1f}%</b>).")
+                    (f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours above the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after peak alignment)"
+                     + (f" within the local-hour peak window <b>{risk2_peak_window[0]:02d}–{risk2_peak_window[1]:02d}</b>" if risk2_peak_window else "")
+                     + f". Estimated probability over {period_desc}: <b>{p2_area * 100:.1f}%</b> (95% CI <b>{ci2a_low * 100:.1f}%</b>–<b>{ci2a_high * 100:.1f}%</b>).")
                     if is_above else
-                    (f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours below the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after trough alignment). "
-                     f"Estimated probability over {period_desc}: <b>{p2_area * 100:.1f}%</b> (95% CI <b>{ci2a_low * 100:.1f}%</b>–<b>{ci2a_high * 100:.1f}%</b>).")
+                    (f"• <b>Risk 2 (Thermal load, area)</b>: {k2_area} of {n_eval} days had total positive degree-hours below the boundary exceeding <b>{risk2_area_thresh:.1f} °F·h</b> (after trough alignment)"
+                     + (f" within the local-hour peak window <b>{risk2_peak_window[0]:02d}–{risk2_peak_window[1]:02d}</b>" if risk2_peak_window else "")
+                     + f". Estimated probability over {period_desc}: <b>{p2_area * 100:.1f}%</b> (95% CI <b>{ci2a_low * 100:.1f}%</b>–<b>{ci2a_high * 100:.1f}%</b>).")
                 ),
                 styles["BodyText"],
             )
@@ -1116,8 +1196,21 @@ def main() -> None:
         default=None,
         help="Custom report title (optional). If not provided, a default based on station, month, and years is used.",
     )
+    
+    parser.add_argument("--risk2-peak-window", nargs=2, type=int, metavar=("START_HR","END_HR"),
+                        help="Local-hour window [START_HR END_HR] to focus Risk 2 metrics (e.g., 12 18). Wrap-around allowed (e.g., 21 3).")
+    parser.add_argument("--risk2-window-in-peak-only", action="store_true",
+                        help="Apply the Risk 2 continuous-window test only within the peak window. If omitted, window test runs on full day.")
+    parser.add_argument("--risk2-min-peak-delta", type=float, default=0.0,
+                        help="Minimum required peak exceedance (°F) at the aligned daily extreme for Risk 2 counting.")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress debug log messages")
 
     args = parser.parse_args()
+    
+
+    if args.quiet:
+        logging.getLogger().setLevel(logging.WARNING)
 
     # Parse years
     year_tokens: List[str] = []
@@ -1143,6 +1236,9 @@ def main() -> None:
             tz_name=args.tz,
             risk2_window_hours=args.risk2_hours,
             risk2_area_thresh=args.risk2_area_thresh,
+            risk2_peak_window=tuple(args.risk2_peak_window) if args.risk2_peak_window else None,
+            risk2_window_in_peak_only=args.risk2_window_in_peak_only,
+            risk2_min_peak_delta=args.risk2_min_peak_delta,
             risk_direction=args.risk_direction,
             outdir=args.outdir,
             report_title=title,

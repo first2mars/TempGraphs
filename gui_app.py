@@ -451,10 +451,10 @@ class ClimoOverlayFrame(ttk.Frame):
 
         row += 1
         ttk.Label(self, text="Shaded region style").grid(row=row, column=0, sticky="e")
-        self.shade_var = tk.StringVar(value="both")
+        self.shade_var = tk.StringVar(value="iqr")
         shade_frame = ttk.Frame(self)
         shade_frame.grid(row=row, column=1, sticky="w")
-        for val, label in [("iqr", "IQR (25–75%)"), ("std", "±1 Std Dev"), ("both", "Both"), ("none", "None")]:
+        for val, label in [("iqr", "IQR (25–75%)"), ("std", "±1 Std Dev"), ("p95", "5–95%"), ("none", "None")]:
             ttk.Radiobutton(shade_frame, text=label, value=val, variable=self.shade_var).pack(side=tk.LEFT, padx=4)
 
         row += 1
@@ -656,10 +656,10 @@ def climo_overlay_tab(notebook):
 
     # Shaded region style
     tk.Label(tab, text="Shaded region style:").pack(anchor="w")
-    shade_var = tk.StringVar(value="both")
+    shade_var = tk.StringVar(value="iqr")
     shade_row = tk.Frame(tab)
     shade_row.pack(anchor="w")
-    for val, label in [("iqr", "IQR (25–75%)"), ("std", "±1 Std Dev"), ("both", "Both"), ("none", "None")]:
+    for val, label in [("iqr", "IQR (25–75%)"), ("std", "±1 Std Dev"), ("p95", "5–95%"), ("none", "None")]:
         tk.Radiobutton(shade_row, text=label, variable=shade_var, value=val).pack(side=tk.LEFT, padx=4)
 
     # Optional chamber test CSV

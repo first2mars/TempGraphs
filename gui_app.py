@@ -662,6 +662,10 @@ def climo_overlay_tab(notebook):
     for val, label in [("iqr", "IQR (25–75%)"), ("std", "±1 Std Dev"), ("p95", "5–95%"), ("none", "None")]:
         tk.Radiobutton(shade_row, text=label, variable=shade_var, value=val).pack(side=tk.LEFT, padx=4)
 
+    # Optional 20°F reference line
+    line20_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(tab, text="Show 20°F reference line", variable=line20_var).pack(anchor="w")
+
     # Optional chamber test CSV
     tk.Label(tab, text="Chamber Test CSV (optional, hour,temp):").pack(anchor="w")
     test_entry = tk.Entry(tab, width=50)
@@ -735,6 +739,8 @@ def climo_overlay_tab(notebook):
                 cmd += ['--composite', '--stations', ','.join(station_ids)]
                 if test_csv:
                     cmd += ['--composite_test', test_csv]
+                if line20_var.get():
+                    cmd += ['--line_20f']
             else:
                 cmd += ['--station', ','.join(station_ids)]
                 if test_csv:

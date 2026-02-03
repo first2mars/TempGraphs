@@ -93,6 +93,7 @@ def build_monthly_climatology(
         return pd.Series({
             'hot_100_109': ((dm >= 100) & (dm <= 109)).sum(),
             'hot_110p': (dm >= 110).sum(),
+            'cold_20': (dn <= 20).sum(),
             'cold_m5_m9': ((dn <= -5) & (dn >= -9)).sum(),
             'cold_m10p': (dn <= -10).sum(),
         })
@@ -166,6 +167,7 @@ def overlay_and_metrics(test: pd.DataFrame, climo_interp: pd.DataFrame, outdir: 
         labels = [
             ("100–109°F", extreme_days.get('hot_100_109', 0)),
             ("≥110°F", extreme_days.get('hot_110p', 0)),
+            ("≤20°F", extreme_days.get('cold_20', 0)),
             ("−5 to −9°F", extreme_days.get('cold_m5_m9', 0)),
             ("≤−10°F", extreme_days.get('cold_m10p', 0)),
         ]
@@ -228,6 +230,7 @@ def plot_composite_mean_std(
     shaded: str = "iqr",
     extremes_by_ident: dict[str, dict] | None = None,
     test: pd.DataFrame | None = None,
+    show_20f_line: bool = False,
 ):
     """
     Plot a single mean line per station. If average_only is False, also shade 25–75% (IQR) and 5–95% ranges.
@@ -274,6 +277,8 @@ def plot_composite_mean_std(
                     parts.append(f"100–109: {ex['hot_100_109']:.1f}")
                 if ex.get('hot_110p', 0):
                     parts.append(f"≥110: {ex['hot_110p']:.1f}")
+                if ex.get('cold_20', 0):
+                    parts.append(f"≤20: {ex['cold_20']:.1f}")
                 if ex.get('cold_m5_m9', 0):
                     parts.append(f"−5–−9: {ex['cold_m5_m9']:.1f}")
                 if ex.get('cold_m10p', 0):
@@ -284,14 +289,14 @@ def plot_composite_mean_std(
             ax = plt.gca()
             # Draw label ABOVE the box
             ax.text(
-                0.98, 0.18, "Average days per year",
+                0.98, 0.78, "Average days per year",
                 transform=ax.transAxes, ha='right', va='bottom', fontsize=9, fontweight='bold',
                 zorder=10, clip_on=False
             )
             # Then the box with ONLY the values
             txt = "\n".join(lines)
             ax.text(
-                0.98, 0.06, txt,
+                0.98, 0.66, txt,
                 transform=ax.transAxes, ha='right', va='bottom',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.85),
                 fontsize=9,
@@ -311,6 +316,9 @@ def plot_composite_mean_std(
                     linewidth=2.8, marker="o",
                     label="Chamber Profile", zorder=3
                 )
+
+    if show_20f_line:
+        plt.hlines(20, xmin=0, xmax=24, colors="black", linestyles="--", linewidth=3.0, label="20°F", zorder=0)
 
     plt.xlabel("Local Hour")
     plt.ylabel("Temperature (°F)")
@@ -495,6 +503,8 @@ def main():
                     help="Composite mode: scan --data_dir for CSVs whose filenames start with a four-letter ID (e.g., KDLF_*.csv) and plot them")
     ap.add_argument("--data_dir", help="Directory to scan for station CSVs")
     ap.add_argument("--composite_test", help="Chamber test CSV to overlay on composite")
+    ap.add_argument("--line_20f", action="store_true",
+                    help="Add a 20°F reference line to composite plots")
     ap.add_argument("--average_only", action="store_true", help="Draw mean lines only (hide ±1 SD bands)")
     ap.add_argument("--shade", choices=["iqr", "std", "p95", "none"], default="iqr",
                     help="Shaded band style for climatology: IQR (25–75%), Std Dev (±1σ), 5–95%, or none (default: iqr)")
@@ -595,6 +605,7 @@ def main():
             shaded=args.shade,
             extremes_by_ident=extremes_by_ident,
             test=test_df_for_composite,
+            show_20f_line=args.line_20f,
         )
 
     else:
